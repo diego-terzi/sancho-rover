@@ -66,9 +66,11 @@ For SANCHO, ROS 2 provides:
 
 ### Docker and why it is used only on the robot
 
-Docker is a containerisation tool that packages an application together with all its dependencies into an isolated environment called a container. On the Arduino UNO Q, Docker is necessary because the QRB2210 runs a minimal Debian Linux that may not have ROS 2 or Python packages pre-installed, and because containerisation makes deployment reproducible — the same Docker image will behave identically regardless of what else is installed on the host.
+Docker is a containerisation tool that packages an application together with all its dependencies into an isolated environment called a container.
 
-During development (on a developer's laptop or WSL2 machine), Docker is not needed. Developers install ROS 2 Jazzy directly on their machine and build the workspace natively. This is faster and allows easier access to debugging tools.
+On the Arduino UNO Q, the QRB2210 runs **Debian Trixie ARM64**. Debian Trixie has no official pre-compiled ROS 2 Jazzy packages, and compiling ROS 2 from source on that hardware would take several hours. Docker solves this by encapsulating an **Ubuntu 24.04** environment inside the container, where ROS 2 Jazzy packages are available as standard `apt` packages — no compilation from source required. The container image is built once (on a faster machine if needed) and then deployed to the robot.
+
+During development (on a developer's laptop or WSL2 machine running Ubuntu 24.04), Docker is not needed. Developers install ROS 2 Jazzy directly and build the workspace natively. This is faster and allows easier access to debugging tools.
 
 ### The Arduino Bridge
 
