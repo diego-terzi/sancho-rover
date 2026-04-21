@@ -1,0 +1,26 @@
+camera_node:
+  ros__parameters:
+    camera_index: 0
+    hsv_lower: [40, 80, 80]    # TODO: tune for fluorescent trail color
+    hsv_upper: [80, 255, 255]  # TODO: tune for fluorescent trail color
+    crop_fraction: 0.5         # TODO: tune during hardware testing
+
+controller_node:
+  ros__parameters:
+    pid_kp: 1.0               # TODO: tune this value
+    pid_ki: 0.0               # TODO: tune this value
+    pid_kd: 0.0               # TODO: tune this value
+    trail_lost_timeout: 2.0   # seconds — TODO: tune this value
+    obstacle_distance_m: 0.3  # meters  — TODO: tune this value
+    base_speed: 0.2           # m/s     — TODO: tune this value
+
+motor_bridge_node:
+  ros__parameters:
+    wheel_separation: 0.2  # meters — TODO: measure actual chassis
+    max_speed: 1.0         # m/s    — TODO: tune once motors are tested
+    max_pwm: 255
+
+sensor_node:
+  ros__parameters:
+    # Bridge poll rate is fixed by the MCU sketch (100 ms interval)
+    # No tunable params for this node yet
