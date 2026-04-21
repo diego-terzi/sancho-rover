@@ -1,0 +1,26 @@
+camera_node:
+  ros__parameters:
+    camera_index: 0
+    frame_width: 640
+    frame_height: 480
+    publish_rate_hz: 30.0
+    hsv_lower: [20, 100, 100]   # TODO: tune for actual fluorescent trail color
+    hsv_upper: [35, 255, 255]   # TODO: tune for actual fluorescent trail color
+    roi_height_percent: 0.3     # TODO: tune based on camera mounting height
+    min_contour_area: 500
+    show_debug: true
+
+controller_node:
+  ros__parameters:
+    pid_kp: 1.0        # TODO: tune
+    pid_ki: 0.0        # TODO: tune
+    pid_kd: 0.0        # TODO: tune
+    base_speed: 0.3    # TODO: tune
+    trail_lost_timeout: 2.0
+    obstacle_distance_m: 0.3
+
+motor_bridge_node:
+  ros__parameters:
+    wheel_separation: 0.2   # TODO: set once chassis dimensions confirmed
+    max_pwm: 255
+    base_speed: 150         # TODO: tune once motors tested
