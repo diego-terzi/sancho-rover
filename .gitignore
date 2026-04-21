@@ -1,5 +1,6 @@
 # Claude Code — keep local, do not push
 .claude/
+CLAUDE.md
 
 # ROS 2 build artifacts
 ros2_ws/build/
