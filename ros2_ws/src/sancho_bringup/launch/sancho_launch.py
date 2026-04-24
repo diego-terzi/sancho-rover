@@ -18,6 +18,18 @@ def generate_launch_description():
             parameters=[config],
             output='screen',
         ),
-        # TODO: add controller_node when implemented
-        # TODO: add motor_bridge_node when implemented
+        Node(
+            package='sancho_control',
+            executable='controller_node',
+            name='controller_node',
+            parameters=[config],
+            output='screen',
+        ),
+        Node(
+            package='sancho_bridge',
+            executable='motor_bridge_node',
+            name='motor_bridge_node',
+            parameters=[config],
+            output='screen',
+        ),
     ])

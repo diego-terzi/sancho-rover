@@ -1,26 +1,41 @@
 camera_node:
   ros__parameters:
-    camera_index: 0
+    camera_index: 2
     frame_width: 640
     frame_height: 480
     publish_rate_hz: 30.0
-    hsv_lower: [20, 100, 100]   # TODO: tune for actual fluorescent trail color
-    hsv_upper: [35, 255, 255]   # TODO: tune for actual fluorescent trail color
-    roi_height_percent: 0.3     # TODO: tune based on camera mounting height
-    min_contour_area: 500
+    hsv_lower: [22, 0, 0]       # calibrated via tools/calibrate_hsv.py
+    hsv_upper: [53, 245, 202]   # calibrated via tools/calibrate_hsv.py
+    roi_height_percent: 0.85    # calibrated via tools/calibrate_hsv.py
+    num_roi_strips: 3           # horizontal slices for multi-point line fit
+    min_contour_area: 500       # px; blobs smaller than this are ignored
+    morph_kernel_size: 5        # erosion/dilation kernel; increase on noisy images
+    ema_alpha: 0.3              # EMA weight on new sample (0=frozen, 1=no smoothing)
+    lost_trail_patience: 5      # frames to coast before publishing NaN
     show_debug: true
 
 controller_node:
   ros__parameters:
-    pid_kp: 1.0        # TODO: tune
-    pid_ki: 0.0        # TODO: tune
-    pid_kd: 0.0        # TODO: tune
-    base_speed: 0.3    # TODO: tune
-    trail_lost_timeout: 2.0
-    obstacle_distance_m: 0.3
+    pid_kp: 1.0              # TODO: tune
+    pid_ki: 0.0              # TODO: tune
+    pid_kd: 0.0              # TODO: tune
+    base_speed: 0.3          # m/s forward speed while FOLLOWING; TODO: tune
+    trail_lost_timeout: 2.0  # seconds of NaN/silence before declaring TRAIL_LOST
+    obstacle_distance_m: 0.3 # meters; below this => OBSTACLE_STOP (needs sensor_node)
+    control_rate_hz: 20.0    # Twist publish rate; also the PID dt
+    max_angular_z: 2.0       # rad/s clamp on PID output
 
 motor_bridge_node:
   ros__parameters:
-    wheel_separation: 0.2   # TODO: set once chassis dimensions confirmed
-    max_pwm: 255
-    base_speed: 150         # TODO: tune once motors tested
+    wheel_separation: 0.30     # m, track center-to-center (measured)
+    wheel_diameter:   0.06     # m, driven sprocket (measured)
+    motor_rpm:        333.0    # no-load RPM at output shaft @ 12 V -> v_max ≈ 1.05 m/s
+    max_pwm:          255      # IBT-2 / BTS7960 is 8-bit PWM
+    deadband_pwm:     0        # TODO: tune on bench (expect 40-80 for a 24 kg tracked chassis)
+    invert_left:      false    # TODO: flip if left track runs backward on first test
+    invert_right:     false    # TODO: flip if right track runs backward on first test
+    left_scale:       1.0      # TODO: calibrate if tracks are asymmetric
+    right_scale:      1.0
+    watchdog_timeout: 0.5      # s; stop motors if no /cmd_vel for this long
+    watchdog_rate_hz: 20.0
+    # dry_run is not set here — auto-detects (True on dev machine, False on rover)
