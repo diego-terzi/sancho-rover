@@ -6,7 +6,8 @@ configured, and the test scenarios that validate the work to date. It complement
 [`architecture.md`](architecture.md), which describes the *target* system; this file
 describes the **as-built state**.
 
-Last updated against commit `b700d22`.
+Last updated against commit `ebdbb65` (with subsequent in-flight tuning of HSV bounds,
+ROI, and wheel separation reflected below).
 
 ---
 
@@ -68,11 +69,13 @@ the controller where the fluorescent trail is in the image plane.
 **Algorithm pipeline.**
 
 1. **Capture** at 640×480, 30 Hz.
-2. **ROI crop** — keep the bottom `roi_height_percent` of the frame. Calibrated
-   value: `0.85` (the C270 is mounted close to the ground; a tall ROI keeps the
-   trail in view across pitch oscillations).
+2. **ROI crop** — keep the bottom `roi_height_percent` of the frame. Configured
+   value: `0.85`. With the C270 mounted at 17 cm height and tilted ~53° downward,
+   the camera's effective ground coverage is ~5–26 cm in front of the rover; an
+   ROI of 0.85 captures the full useful look-ahead without including the
+   degenerate top edge of the frame.
 3. **HSV mask** with bounds calibrated via [`tools/calibrate_hsv.py`](../tools/calibrate_hsv.py).
-   Calibrated values: `lower=[22, 0, 0]`, `upper=[53, 245, 202]`.
+   Calibrated values: `lower=[18, 34, 0]`, `upper=[61, 255, 221]`.
 4. **Morphological cleanup**:
    - `MORPH_OPEN` (erode → dilate) removes isolated noise pixels (stray paint
      reflections, motion-blur fragments).
@@ -221,7 +224,7 @@ v_left  = linear.x − angular.z · d / 2
 v_right = linear.x + angular.z · d / 2
 ```
 
-with `d = wheel_separation = 0.30 m` (measured, centre-to-centre between tracks).
+with `d = wheel_separation = 0.265 m` (measured, centre-to-centre between tracks).
 Sign convention as above: `angular.z > 0` ⇒ left turn ⇒ right track faster.
 
 **Velocity-to-PWM mapping.** Defined by:
@@ -234,8 +237,10 @@ v_max  = (RPM / 60) · π · D
 pwm_k  = clamp( v_k / v_max · max_pwm · scale_k, −max_pwm, +max_pwm )
 ```
 
-with `RPM = 333` (no-load output-shaft RPM at 12 V), `D = 0.06 m` (sprocket
-diameter), `max_pwm = 255`. Scale and invert flags are applied per channel:
+with `RPM = 333` (measured: shaft RPM at PWM 255 with the 5 kg cardboard prototype
+under load — *not* the datasheet no-load value; this absorbs gear losses and
+loaded-condition slip), `D = 0.06 m` (sprocket diameter), `max_pwm = 255`. Scale
+and invert flags are applied per channel:
 
 ```
 if 0 < |pwm_k| < deadband_pwm:  pwm_k → ±deadband_pwm    # stiction compensation
@@ -419,9 +424,9 @@ All values live in
 |---|---|---|
 | `frame_width × frame_height` | 640 × 480 | C270 working resolution |
 | `publish_rate_hz` | 30.0 | matches C270 max FPS |
-| `hsv_lower` | `[22, 0, 0]` | calibrated via `tools/calibrate_hsv.py` |
-| `hsv_upper` | `[53, 245, 202]` | calibrated via `tools/calibrate_hsv.py` |
-| `roi_height_percent` | 0.85 | calibrated; tall ROI for low-mounted camera |
+| `hsv_lower` | `[18, 34, 0]` | calibrated via `tools/calibrate_hsv.py` |
+| `hsv_upper` | `[61, 255, 221]` | calibrated via `tools/calibrate_hsv.py` |
+| `roi_height_percent` | 0.85 | extended for look-ahead — see §5.1 below |
 | `num_roi_strips` | 3 | balance: ≥ 2 for line fit, ≤ 4 for compute budget |
 | `min_contour_area` | 500 px | rejects noise blobs |
 | `morph_kernel_size` | 5 | small enough to preserve trail edges |
@@ -445,15 +450,63 @@ All values live in
 
 | Param | Value | Source |
 |---|---|---|
-| `wheel_separation` | 0.30 m | measured, track centre-to-centre |
+| `wheel_separation` | 0.265 m | measured, track centre-to-centre |
 | `wheel_diameter` | 0.06 m | measured |
-| `motor_rpm` | 333.0 | no-load shaft RPM at 12 V |
+| `motor_rpm` | 333.0 | calibrated: shaft RPM at PWM 255 under 5 kg prototype load |
 | **derived** `v_max` | ≈ 1.046 m/s | `(333/60)·π·0.06` |
 | `max_pwm` | 255 | 8-bit PWM |
 | `deadband_pwm` | 0 | TODO: bench-tune (expect 40–80) |
 | `invert_left` / `invert_right` | false / false | TODO: confirm on first power-up |
 | `left_scale` / `right_scale` | 1.0 / 1.0 | TODO: calibrate if asymmetric |
 | `watchdog_timeout` | 0.5 s | software watchdog at the bridge level |
+
+### Chassis & mass (current prototype)
+
+| Quantity | Value | Notes |
+|---|---|---|
+| Mass (cardboard 1:1 prototype) | ≤ 5 kg | dimensioned spec is 24 kg with the DJI Power 2000; the kinematic & motor sizing was done for the dimensioned spec, not the lighter prototype |
+| Track separation `d` | 26.5 cm | |
+| Sprocket diameter | 6 cm | |
+| Camera mounting height | 17 cm | from ground to lens |
+| Camera tilt | ~53° below horizontal | inferred from "trail visible from 5 cm" boundary (see §5.1) |
+
+### 5.1 Camera geometry & look-ahead — derived
+
+The camera (Logitech C270, vertical FOV ≈ 41°, half-FOV ≈ 20.5°) is mounted at
+height **h = 17 cm** above the ground and tilted downward such that the
+**closest visible point on the ground is 5 cm in front** of the rover.
+
+**Camera tilt below horizontal** (angle of the optical axis):
+
+```
+θ_tilt = atan(h / d_near) − FOV_v/2
+       = atan(0.17 / 0.05) − 20.5°
+       ≈ 73.6° − 20.5°
+       ≈ 53.1°  below horizontal
+```
+
+**Far visible point** (top of the frame on the ground):
+
+```
+d_far = h / tan(θ_tilt − FOV_v/2)
+      = 0.17 / tan(32.6°)
+      ≈ 0.265 m  (~26.5 cm in front of the rover)
+```
+
+**Total visible ground strip:** ~5 cm to ~26 cm in front of the rover —
+**roughly 21 cm of usable look-ahead**.
+
+**Implication for control.** With `roi_height_percent = 0.40` (the previous
+calibration), the controller would only see ~5 cm to ~13 cm — at
+`base_speed = 0.3 m/s` that corresponds to **0.43 s of reaction time**,
+far too short for a reactive PID to anticipate curves. The current value
+`0.85` extends the controller's effective look-ahead to nearly the full
+geometric maximum.
+
+This short look-ahead is also the reason `camera_node` already publishes
+`/trail_heading` (the slope of the fitted multi-strip line). Wiring this
+into `controller_node` as a feed-forward term is identified as the most
+valuable next improvement for curve handling — see §7.4.
 
 ---
 
@@ -485,8 +538,8 @@ All values live in
 - `ros2 topic pub -r 20 /cmd_vel geometry_msgs/Twist "{linear: {x: 0.3}, angular: {z: 0.0}}"`
 - Expected log: `[dry_run] set_motors(L=  +73, R=  +73)`. Verifying: `0.3 / 1.046
   · 255 ≈ 73`. ✓
-- `linear.x: 0.0, angular.z: 1.0` → `L ≈ -36, R ≈ +36`. Verifying: `1.0 · 0.30
-  / 2 / 1.046 · 255 ≈ 36.6`. ✓
+- `linear.x: 0.0, angular.z: 1.0` → `L ≈ -32, R ≈ +32`. Verifying: `1.0 · 0.265
+  / 2 / 1.046 · 255 ≈ 32.3`. ✓
 - Stop the publisher → after ~ 0.5 s, log shows `watchdog: no /cmd_vel for X s
   — stopping motors`. ✓
 
@@ -550,13 +603,31 @@ To be done **after** the firmware compiles and motors spin:
 4. Optionally measure real `v_max` (timed run over a known distance) and
    correct `motor_rpm` so the kinematic mapping reflects loaded conditions.
 
-### 7.4 Live parameter updates in `controller_node`
+### 7.4 Feed-forward on `/trail_heading` (curve anticipation)
+
+The controller currently uses only the lateral error. With the camera's short
+look-ahead (~21 cm of useful ground strip; see §5.1), a purely reactive PID
+will turn late on curves and tend to cut corners on the inside.
+
+`camera_node` already publishes `/trail_heading` (radians) — the slope of the
+multi-strip fitted line — but the controller does not consume it. A feed-forward
+term
+
+```
+u = K_p ε + K_i ∫ε + K_d dε/dt + K_ff · heading
+```
+
+would let the rover proactively rotate based on where the trail is *going*, not
+just where it currently is. This is the most cost-effective improvement
+identified for curve handling and should be the next behavioural change.
+
+### 7.5 Live parameter updates in `controller_node`
 
 The PID gains are currently read once at startup. `ros2 param set` will update
 the parameter store but the node won't re-read the value. For tuning, this is
 unergonomic — a `set_parameters_callback` hook would let live re-tuning work.
 
-### 7.5 Documentation updates
+### 7.6 Documentation updates
 
 [`docs/architecture.md`](architecture.md) was written for the original single-
 package layout (`sancho_rover`) and the L298N driver. It needs a pass to match

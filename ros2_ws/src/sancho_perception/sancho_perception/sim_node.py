@@ -56,7 +56,7 @@ class SimNode(Node):
 
         # Physical params needed to convert motor_pwm -> wheel velocity -> body motion.
         # These must match motor_bridge_node's values for the loop to behave correctly.
-        self.declare_parameter('wheel_separation_m', 0.30)
+        self.declare_parameter('wheel_separation_m', 0.265)
         self.declare_parameter('wheel_diameter_m',   0.06)
         self.declare_parameter('motor_rpm',          333.0)
         self.declare_parameter('max_pwm',            255)

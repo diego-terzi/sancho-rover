@@ -45,7 +45,7 @@ class MotorBridgeNode(Node):
 
         # --- parameters ---------------------------------------------------
         # Kinematics (from hardware measurement)
-        self.declare_parameter('wheel_separation', 0.30)   # m, track center-to-center
+        self.declare_parameter('wheel_separation', 0.265)  # m, track center-to-center
         self.declare_parameter('wheel_diameter',   0.06)   # m, driven sprocket
         self.declare_parameter('motor_rpm',        333.0)  # no-load RPM at the output shaft @ 12 V
 

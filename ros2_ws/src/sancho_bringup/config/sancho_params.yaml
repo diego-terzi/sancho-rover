@@ -1,12 +1,12 @@
 camera_node:
   ros__parameters:
-    camera_index: 2
+    camera_index: 0
     frame_width: 640
     frame_height: 480
     publish_rate_hz: 30.0
-    hsv_lower: [22, 0, 0]       # calibrated via tools/calibrate_hsv.py
-    hsv_upper: [53, 245, 202]   # calibrated via tools/calibrate_hsv.py
-    roi_height_percent: 0.85    # calibrated via tools/calibrate_hsv.py
+    hsv_lower: [18, 34, 0]      # calibrated via tools/calibrate_hsv.py
+    hsv_upper: [61, 255, 221]   # calibrated via tools/calibrate_hsv.py
+    roi_height_percent: 0.85    # extended for look-ahead (camera FOV: 5-26 cm in front)
     num_roi_strips: 3           # horizontal slices for multi-point line fit
     min_contour_area: 500       # px; blobs smaller than this are ignored
     morph_kernel_size: 5        # erosion/dilation kernel; increase on noisy images
@@ -27,9 +27,9 @@ controller_node:
 
 motor_bridge_node:
   ros__parameters:
-    wheel_separation: 0.30     # m, track center-to-center (measured)
+    wheel_separation: 0.265    # m, track center-to-center (measured)
     wheel_diameter:   0.06     # m, driven sprocket (measured)
-    motor_rpm:        333.0    # no-load RPM at output shaft @ 12 V -> v_max ≈ 1.05 m/s
+    motor_rpm:        333.0    # measured: 333 RPM @ PWM 255 with 5 kg prototype load -> v_max ≈ 1.05 m/s
     max_pwm:          255      # IBT-2 / BTS7960 is 8-bit PWM
     deadband_pwm:     0        # TODO: tune on bench (expect 40-80 for a 24 kg tracked chassis)
     invert_left:      false    # TODO: flip if left track runs backward on first test
