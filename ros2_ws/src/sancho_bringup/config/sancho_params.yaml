@@ -38,4 +38,6 @@ motor_bridge_node:
     right_scale:      1.0
     watchdog_timeout: 0.5      # s; stop motors if no /cmd_vel for this long
     watchdog_rate_hz: 20.0
-    # dry_run is not set here — auto-detects (True on dev machine, False on rover)
+    udp_target_host: 127.0.0.1 # App Lab Python shim listens here
+    udp_target_port: 9001
+    dry_run: false             # set true to skip UDP send (kinematics-only test)

@@ -1,42 +1,43 @@
 """
-motor_bridge_node — the only node that talks to the MCU.
+motor_bridge_node — converts /cmd_vel into per-track PWM and forwards to the MCU.
 
-Subscribes to /cmd_vel (Twist), converts the velocity command into per-track PWM
-using differential-drive kinematics, and sends `set_motors(left, right)` over the
-Arduino Bridge RPC to the MCU. A watchdog stops the motors if /cmd_vel stops
-arriving — the rover must not keep rolling when the controller dies.
+Subscribes to /cmd_vel (Twist), applies differential-drive kinematics, maps the
+result to signed PWM in [-255, +255], and emits the result two ways:
 
-On dev machines (no Bridge library, no MCU), the node runs in `dry_run` mode:
-it logs the PWMs it *would* send but does not call the Bridge. This lets you
-validate the kinematics and watchdog end-to-end without hardware.
+  1. /motor_pwm (Int16MultiArray)            — telemetry, consumed by sim_node
+  2. UDP datagram to 127.0.0.1:9001          — consumed by an Arduino App Lab
+                                               Python shim (arduino/sancho_bridge/python/main.py)
+                                               that calls Bridge.notify("set_motors", L, R)
 
-Pipeline:
-    /cmd_vel ──► _on_cmd_vel ──► diff-drive kinematics ──► velocity → PWM ──►
-      clamp/scale/invert/deadband ──► bridge.call("set_motors", L, R)
+The two-step UDP→Bridge path exists because our ROS 2 stack runs in Docker,
+while Arduino's `arduino.app_utils.Bridge` lives in App Lab's per-app venv on
+the host. UDP is the simplest decoupling: Docker doesn't need to know anything
+about App Lab; the App Lab shim doesn't need to know anything about ROS 2.
 
-    timer @ watchdog_rate_hz ──► if no cmd recently, send set_motors(0, 0)
+A 500 ms software watchdog forces a stop command when /cmd_vel stops arriving.
+This is the first of three independent safety layers:
+  1. this Python watchdog
+  2. an MCU-side firmware watchdog (also 500 ms)
+  3. PWM = 0 = BTS7960 half-bridges off → motors coast
+
+`dry_run` mode skips both /motor_pwm publish (no, it still publishes — telemetry is
+always on) and the UDP send. Use it on dev machines that don't have the App Lab
+shim running, just to verify the kinematics math.
 """
 
 import math
+import socket
+import struct
 
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Twist
 from std_msgs.msg import Int16MultiArray
 
-# The Arduino Bridge library is only installed on the MPU (Arduino UNO Q).
-# On a dev machine the import will fail — the node then runs in dry_run mode.
-try:
-    # TODO: confirm the actual Python import path on the Arduino UNO Q.
-    # The Arduino Bridge project exposes a Python client alongside the C++
-    # Arduino-side library; adjust this import once the deployment image is built.
-    from arduino_bridge import Bridge  # type: ignore
-    _BRIDGE_IMPORT_OK = True
-    _BRIDGE_IMPORT_ERR = ''
-except Exception as _e:  # ImportError, or any runtime failure at import time
-    Bridge = None  # type: ignore[assignment]
-    _BRIDGE_IMPORT_OK = False
-    _BRIDGE_IMPORT_ERR = str(_e)
+
+# Wire format for the UDP packets to the App Lab shim:
+#   2 little-endian signed shorts: [left_pwm, right_pwm]
+_PWM_PACKET_FMT = "<hh"
 
 
 class MotorBridgeNode(Node):
@@ -45,13 +46,13 @@ class MotorBridgeNode(Node):
 
         # --- parameters ---------------------------------------------------
         # Kinematics (from hardware measurement)
-        self.declare_parameter('wheel_separation', 0.265)  # m, track center-to-center
-        self.declare_parameter('wheel_diameter',   0.06)   # m, driven sprocket
-        self.declare_parameter('motor_rpm',        333.0)  # no-load RPM at the output shaft @ 12 V
+        self.declare_parameter('wheel_separation', 0.265)
+        self.declare_parameter('wheel_diameter',   0.06)
+        self.declare_parameter('motor_rpm',        333.0)
 
         # PWM limits
-        self.declare_parameter('max_pwm',       255)       # IBT-2 / BTS7960 is 8-bit PWM
-        self.declare_parameter('deadband_pwm',  0)         # min PWM below which motors don't spin
+        self.declare_parameter('max_pwm',       255)
+        self.declare_parameter('deadband_pwm',  0)
 
         # Per-motor calibration
         self.declare_parameter('invert_left',   False)
@@ -60,11 +61,13 @@ class MotorBridgeNode(Node):
         self.declare_parameter('right_scale',   1.0)
 
         # Safety
-        self.declare_parameter('watchdog_timeout', 0.5)    # s; stop if no cmd_vel for this long
-        self.declare_parameter('watchdog_rate_hz', 20.0)   # watchdog check frequency
+        self.declare_parameter('watchdog_timeout', 0.5)
+        self.declare_parameter('watchdog_rate_hz', 20.0)
 
-        # Dev/test — defaults to auto: True when Bridge not importable, else False
-        self.declare_parameter('dry_run', not _BRIDGE_IMPORT_OK)
+        # UDP forwarding to the App Lab Bridge shim
+        self.declare_parameter('udp_target_host', '127.0.0.1')
+        self.declare_parameter('udp_target_port', 9001)
+        self.declare_parameter('dry_run', False)
 
         # --- read params --------------------------------------------------
         self.d         = float(self.get_parameter('wheel_separation').value)
@@ -78,55 +81,42 @@ class MotorBridgeNode(Node):
         self.sc_right  = float(self.get_parameter('right_scale').value)
         self.wd_timeout = float(self.get_parameter('watchdog_timeout').value)
         self.wd_rate   = float(self.get_parameter('watchdog_rate_hz').value)
+        self.udp_host  = str(self.get_parameter('udp_target_host').value)
+        self.udp_port  = int(self.get_parameter('udp_target_port').value)
         self.dry_run   = bool(self.get_parameter('dry_run').value)
 
         # --- derived ------------------------------------------------------
-        # v_max = (rpm/60) * pi * diameter   [m/s at full PWM, no-load]
         self.v_max = (self.rpm / 60.0) * math.pi * self.diameter
         if self.v_max <= 0.0:
             raise RuntimeError(
                 f'v_max must be > 0 (got {self.v_max}). Check wheel_diameter and motor_rpm.'
             )
 
-        # --- bridge init --------------------------------------------------
-        self.bridge = None
-        if not self.dry_run:
-            if not _BRIDGE_IMPORT_OK:
-                self.get_logger().warn(
-                    f'Arduino Bridge import failed ({_BRIDGE_IMPORT_ERR}); forcing dry_run=True'
-                )
-                self.dry_run = True
-            else:
-                try:
-                    self.bridge = Bridge()           # TODO: confirm constructor signature
-                    self.bridge.begin()              # TODO: confirm init method on hardware
-                except Exception as e:
-                    self.get_logger().error(
-                        f'Failed to initialize Bridge: {e}. Forcing dry_run=True.'
-                    )
-                    self.bridge = None
-                    self.dry_run = True
+        # --- UDP socket ---------------------------------------------------
+        self.udp_target = (self.udp_host, self.udp_port)
+        self.udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        # Connect-style: the OS caches the route, slightly cheaper than per-call resolution
+        # We don't actually connect (UDP is connectionless), just record the target.
 
         # --- state --------------------------------------------------------
         self.last_cmd_time = None
         self.last_left_pwm = 0
         self.last_right_pwm = 0
-        self.stopped = True  # initial state: motors not running
+        self.stopped = True
 
         # --- I/O + timer --------------------------------------------------
-        # Create the publisher before the first _send() so the startup stop
-        # can publish its telemetry.
         self.pwm_pub = self.create_publisher(Int16MultiArray, 'motor_pwm', 10)
         self.create_subscription(Twist, 'cmd_vel', self._on_cmd_vel, 10)
         self.create_timer(1.0 / self.wd_rate, self._watchdog)
 
-        # Send an explicit stop at startup so the MCU's PWM is at known 0
+        # Send an explicit stop at startup so the MCU sees a known 0 ASAP.
         self._send(0, 0)
 
         self.get_logger().info(
             f'motor_bridge_node ready | d={self.d:.3f} m, '
             f'diam={self.diameter:.3f} m, rpm={self.rpm:.1f} -> v_max={self.v_max:.3f} m/s | '
-            f'watchdog={self.wd_timeout:.2f} s | dry_run={self.dry_run}'
+            f'watchdog={self.wd_timeout:.2f} s | udp -> {self.udp_host}:{self.udp_port} | '
+            f'dry_run={self.dry_run}'
         )
 
     # ------------------------------------------------------------------ cmd_vel
@@ -155,9 +145,6 @@ class MotorBridgeNode(Node):
         pwm = int(round(pwm))
         pwm = max(-self.max_pwm, min(self.max_pwm, pwm))
 
-        # Deadband: if we're commanding non-zero motion but below the stiction
-        # threshold, bump up to the deadband so the motor actually moves.
-        # A true zero command still produces PWM 0 (not deadband).
         if self.deadband > 0 and 0 < abs(pwm) < self.deadband:
             pwm = self.deadband if pwm > 0 else -self.deadband
 
@@ -171,8 +158,7 @@ class MotorBridgeNode(Node):
         self.last_left_pwm = left
         self.last_right_pwm = right
 
-        # Telemetry — always publish, even in dry_run. Wrapped because on
-        # shutdown the publisher's context may already be invalid.
+        # Telemetry — always publish (consumed by sim_node).
         tel = Int16MultiArray()
         tel.data = [int(left), int(right)]
         try:
@@ -183,16 +169,21 @@ class MotorBridgeNode(Node):
         if self.dry_run:
             self.get_logger().info(f'[dry_run] set_motors(L={left:+4d}, R={right:+4d})')
             return
+
+        # Forward to the App Lab Python shim via UDP.
+        # Clamp to int16 range just in case (max_pwm is 255 by default).
+        l16 = max(-32768, min(32767, int(left)))
+        r16 = max(-32768, min(32767, int(right)))
         try:
-            self.bridge.call('set_motors', left, right)
+            self.udp_sock.sendto(struct.pack(_PWM_PACKET_FMT, l16, r16), self.udp_target)
         except Exception as e:
-            self.get_logger().error(f'bridge.call(set_motors) failed: {e}')
+            self.get_logger().error(f'UDP send to {self.udp_target} failed: {e}')
 
     # ------------------------------------------------------------------ watchdog
 
     def _watchdog(self):
         if self.last_cmd_time is None:
-            return  # never received a command — leave motors at 0, nothing to time out
+            return
         age = (self.get_clock().now() - self.last_cmd_time).nanoseconds * 1e-9
         if age > self.wd_timeout and not self.stopped:
             self.get_logger().warn(
@@ -204,13 +195,15 @@ class MotorBridgeNode(Node):
     # ------------------------------------------------------------------ shutdown
 
     def destroy_node(self):
-        # Always leave the rover stopped on exit
-        self._send(0, 0)
-        if self.bridge is not None:
-            try:
-                self.bridge.call('emergency_stop')
-            except Exception:
-                pass
+        # Best-effort stop on exit.
+        try:
+            self._send(0, 0)
+        except Exception:
+            pass
+        try:
+            self.udp_sock.close()
+        except Exception:
+            pass
         super().destroy_node()
 
 
