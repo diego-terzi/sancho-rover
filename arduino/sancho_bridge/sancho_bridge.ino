@@ -26,8 +26,8 @@
 // 11/12 are intentionally left free for the upcoming HC-SR04, and A4/A5 for I²C.
 #define LEFT_RPWM    5      // PWM forward, left  motor
 #define LEFT_LPWM    6      // PWM reverse, left  motor
-#define RIGHT_RPWM   9      // PWM forward, right motor
-#define RIGHT_LPWM  10      // PWM reverse, right motor
+#define RIGHT_RPWM  10      // PWM forward, right motor — swapped vs left to match wiring
+#define RIGHT_LPWM   9      // PWM reverse, right motor
 
 // ── MCU-side watchdog ─────────────────────────────────────────────────────────
 // If the MPU stops calling set_motors() for this long, the MCU autonomously
