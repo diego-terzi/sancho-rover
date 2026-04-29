@@ -1,3 +1,5 @@
+import os
+
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Float32
@@ -36,6 +38,14 @@ class CameraNode(Node):
         self.ema_alpha = self.get_parameter('ema_alpha').value
         self.lost_trail_patience = self.get_parameter('lost_trail_patience').value
         self.show_debug = self.get_parameter('show_debug').value
+        # Without an X11 DISPLAY, Qt's xcb plugin aborts the whole process when
+        # cv2.imshow is invoked (this is a hard abort, not a catchable Python
+        # exception). Detect that up-front and disable debug rendering.
+        if self.show_debug and not os.environ.get('DISPLAY'):
+            self.get_logger().warn(
+                'No DISPLAY environment variable — running headless, disabling show_debug'
+            )
+            self.show_debug = False
 
         self.morph_kernel = cv2.getStructuringElement(
             cv2.MORPH_ELLIPSE, (morph_k, morph_k)
@@ -161,17 +171,9 @@ class CameraNode(Node):
             for i in range(1, self.num_roi_strips):
                 y = roi_h - i * strip_h
                 cv2.line(roi, (0, y), (width, y), (80, 80, 80), 1)
-            try:
-                cv2.imshow('ROI + detection', roi)
-                cv2.imshow('Mask', mask)
-                cv2.waitKey(1)
-            except cv2.error as e:
-                # No display available (typical in headless Docker). Disable
-                # debug rendering for the rest of this run instead of crashing.
-                self.get_logger().warn(
-                    f'cv2.imshow failed ({e}); disabling show_debug for this session'
-                )
-                self.show_debug = False
+            cv2.imshow('ROI + detection', roi)
+            cv2.imshow('Mask', mask)
+            cv2.waitKey(1)
 
         self.frame_count += 1
         if self.frame_count % max(1, int(self.publish_rate_hz)) == 0:
