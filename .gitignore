@@ -15,8 +15,6 @@ __pycache__/
 .env
 venv/
 
-# Docker
-.dockerignore
 
 # OS
 .DS_Store

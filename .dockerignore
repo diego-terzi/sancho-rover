@@ -1,0 +1,29 @@
+# Build artifacts (the image rebuilds them inside the container)
+ros2_ws/build/
+ros2_ws/install/
+ros2_ws/log/
+
+# Local-only Claude context
+.claude/
+CLAUDE.md
+claude.md
+
+# Tools and docs not needed in the rover image
+tools/
+docs/
+
+# Git metadata
+.git/
+.gitignore
+.gitattributes
+
+# Python cruft
+__pycache__/
+*.pyc
+*.pyo
+.env
+venv/
+
+# OS noise
+.DS_Store
+Thumbs.db
