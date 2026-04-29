@@ -26,7 +26,7 @@ import struct
 
 from arduino.app_utils import App, Bridge
 
-UDP_HOST = "127.0.0.1"
+UDP_HOST = "0.0.0.0"  # bind to all interfaces — App Lab runs us in its own container
 UDP_PORT = 9001
 PACKET_FMT = "<hh"               # 2 little-endian signed shorts: left, right
 PACKET_LEN = struct.calcsize(PACKET_FMT)
