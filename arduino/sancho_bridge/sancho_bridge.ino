@@ -1,76 +1,68 @@
+// SANCHO MCU firmware — runs on the STM32U585 of the Arduino UNO Q.
+//
+// Responsibility:
+//   Receive set_motors(left, right) RPC calls from the MPU (Linux + ROS 2)
+//   over the Arduino Bridge UART, and drive two BTS7960 (IBT-2) motor-driver
+//   modules accordingly.
+//
+// Safety: three independent layers prevent runaway motion.
+//   1) motor_bridge_node (Python)  — software watchdog, ~500 ms
+//   2) MCU watchdog here           — independent watchdog at the firmware level
+//   3) BTS7960 with PWM = 0        — half-bridges off → motors coast
+//
+// Wiring strategy (Strategy A, simplest):
+//   On each BTS7960 module, R_EN and L_EN are tied directly to the module's
+//   +5 V supply (always enabled). The MCU only drives the two PWM inputs per
+//   module. R_IS and L_IS (current sense) are left unconnected for now.
+//   Total MCU pins used: 4 (all PWM-capable).
+//
+// Sensors: not yet integrated in this revision. HC-SR04 ultrasonic and
+// MPU-6050 IMU will be added in a later pass.
+
 #include <ArduinoBridge.h>
-#include <Wire.h>
 
-// L298N motor driver pins — TODO: confirm pin assignments on hardware
-#define MOTOR_LEFT_EN   9
-#define MOTOR_LEFT_IN1  8
-#define MOTOR_LEFT_IN2  7
-#define MOTOR_RIGHT_EN  6
-#define MOTOR_RIGHT_IN1 5
-#define MOTOR_RIGHT_IN2 4
+// ── BTS7960 control pins ──────────────────────────────────────────────────────
+// All four must be PWM-capable. On Arduino UNO Q, pins 5/6/9/10 are PWM.
+// 11/12 are intentionally left free for the upcoming HC-SR04, and A4/A5 for I²C.
+#define LEFT_RPWM    5      // PWM forward, left  motor
+#define LEFT_LPWM    6      // PWM reverse, left  motor
+#define RIGHT_RPWM   9      // PWM forward, right motor
+#define RIGHT_LPWM  10      // PWM reverse, right motor
 
-// HC-SR04 pins — TODO: confirm pin assignments on hardware
-#define TRIG_PIN 12
-#define ECHO_PIN 11
+// ── MCU-side watchdog ─────────────────────────────────────────────────────────
+// If the MPU stops calling set_motors() for this long, the MCU autonomously
+// zeroes the PWMs. This is the second of the three safety layers and protects
+// against a frozen / crashed Python side that the MPU-side watchdog could miss.
+#define MOTOR_WATCHDOG_MS  500UL
 
-// MPU-6050 I2C address (default, AD0 = LOW)
-#define MPU6050_ADDR 0x68
-
-// Hardware emergency stop distance in cm — TODO: tune this value
-// This check runs in loop() and is completely independent of ROS 2
-#define EMERGENCY_STOP_THRESHOLD_CM 15
-
-// Sensor notification interval
-#define SENSOR_INTERVAL_MS 100
-
-unsigned long lastSensorMs = 0;
+unsigned long lastSetMotorsMs = 0;
 
 // ── Setup ─────────────────────────────────────────────────────────────────────
 
 void setup() {
     Bridge.begin();
 
-    pinMode(MOTOR_LEFT_EN,   OUTPUT);
-    pinMode(MOTOR_LEFT_IN1,  OUTPUT);
-    pinMode(MOTOR_LEFT_IN2,  OUTPUT);
-    pinMode(MOTOR_RIGHT_EN,  OUTPUT);
-    pinMode(MOTOR_RIGHT_IN1, OUTPUT);
-    pinMode(MOTOR_RIGHT_IN2, OUTPUT);
+    pinMode(LEFT_RPWM,  OUTPUT);
+    pinMode(LEFT_LPWM,  OUTPUT);
+    pinMode(RIGHT_RPWM, OUTPUT);
+    pinMode(RIGHT_LPWM, OUTPUT);
 
-    pinMode(TRIG_PIN, OUTPUT);
-    pinMode(ECHO_PIN, INPUT);
+    stopMotors();  // safe default before the first MPU command arrives
 
-    Wire.begin();
-    initMPU6050();
-
-    stopMotors();  // safe default before any ROS 2 command arrives
-
-    Bridge.expose("set_motors",    setMotors);
+    Bridge.expose("set_motors",     setMotors);
     Bridge.expose("emergency_stop", emergencyStop);
 }
 
 // ── Main loop ─────────────────────────────────────────────────────────────────
 
 void loop() {
-    int distance = readUltrasonic();  // returns -1 if no echo
+    Bridge.process();
 
-    // Hardware emergency stop — always active, independent of ROS 2
-    if (distance > 0 && distance < EMERGENCY_STOP_THRESHOLD_CM) {
+    // MCU-side watchdog. millis() wraps every ~49 days; the subtraction is
+    // wrap-safe because both operands are unsigned long.
+    if (millis() - lastSetMotorsMs > MOTOR_WATCHDOG_MS) {
         stopMotors();
     }
-
-    if (millis() - lastSensorMs >= SENSOR_INTERVAL_MS) {
-        lastSensorMs = millis();
-
-        float gyroZ = readGyroZ();
-
-        ArduinoBridgeMessage msg;
-        msg.put("distance", (float)distance);
-        msg.put("gyro_z",   gyroZ);
-        Bridge.notify("sensor_data", msg);
-    }
-
-    Bridge.process();
 }
 
 // ── Bridge-exposed functions ───────────────────────────────────────────────────
@@ -78,60 +70,38 @@ void loop() {
 void setMotors(ArduinoBridgeRequest &req) {
     int left  = req.getInt(0);
     int right = req.getInt(1);
-    applyMotor(MOTOR_LEFT_EN,  MOTOR_LEFT_IN1,  MOTOR_LEFT_IN2,  left);
-    applyMotor(MOTOR_RIGHT_EN, MOTOR_RIGHT_IN1, MOTOR_RIGHT_IN2, right);
+    applyMotor(LEFT_RPWM,  LEFT_LPWM,  left);
+    applyMotor(RIGHT_RPWM, RIGHT_LPWM, right);
+    lastSetMotorsMs = millis();
 }
 
 void emergencyStop(ArduinoBridgeRequest &req) {
     stopMotors();
+    // Reset the watchdog timestamp so the loop continues to enforce stop
+    // until a fresh set_motors() call explicitly resumes operation.
+    lastSetMotorsMs = 0;
 }
 
-// ── Motor helpers ──────────────────────────────────────────────────────────────
+// ── Motor helpers ─────────────────────────────────────────────────────────────
 
-void applyMotor(int enPin, int in1, int in2, int pwm) {
+// BTS7960 dual-PWM control. Convention:
+//   FORWARD (pwm > 0) : RPWM = |pwm|, LPWM = 0
+//   REVERSE (pwm < 0) : RPWM = 0,     LPWM = |pwm|
+//   STOP    (pwm = 0) : both pins 0  (coast — half-bridges off, no braking)
+void applyMotor(int rpwm_pin, int lpwm_pin, int pwm) {
     pwm = constrain(pwm, -255, 255);
     if (pwm >= 0) {
-        digitalWrite(in1, HIGH);
-        digitalWrite(in2, LOW);
+        analogWrite(rpwm_pin, pwm);
+        analogWrite(lpwm_pin, 0);
     } else {
-        digitalWrite(in1, LOW);
-        digitalWrite(in2, HIGH);
-        pwm = -pwm;
+        analogWrite(rpwm_pin, 0);
+        analogWrite(lpwm_pin, -pwm);
     }
-    analogWrite(enPin, pwm);
 }
 
 void stopMotors() {
-    analogWrite(MOTOR_LEFT_EN,  0);
-    analogWrite(MOTOR_RIGHT_EN, 0);
-}
-
-// ── Sensor helpers ─────────────────────────────────────────────────────────────
-
-int readUltrasonic() {
-    digitalWrite(TRIG_PIN, LOW);
-    delayMicroseconds(2);
-    digitalWrite(TRIG_PIN, HIGH);
-    delayMicroseconds(10);
-    digitalWrite(TRIG_PIN, LOW);
-
-    long duration = pulseIn(ECHO_PIN, HIGH, 30000UL);  // 30 ms timeout
-    if (duration == 0) return -1;
-    return (int)(duration * 0.034f / 2.0f);  // microseconds → cm
-}
-
-void initMPU6050() {
-    Wire.beginTransmission(MPU6050_ADDR);
-    Wire.write(0x6B);  // PWR_MGMT_1
-    Wire.write(0x00);  // wake up (clear sleep bit)
-    Wire.endTransmission(true);
-}
-
-float readGyroZ() {
-    Wire.beginTransmission(MPU6050_ADDR);
-    Wire.write(0x47);  // GYRO_ZOUT_H register
-    Wire.endTransmission(false);
-    Wire.requestFrom(MPU6050_ADDR, 2, true);
-    int16_t raw = ((int16_t)Wire.read() << 8) | Wire.read();
-    return raw / 131.0f;  // ±250 deg/s full scale → deg/s
+    analogWrite(LEFT_RPWM,  0);
+    analogWrite(LEFT_LPWM,  0);
+    analogWrite(RIGHT_RPWM, 0);
+    analogWrite(RIGHT_LPWM, 0);
 }
