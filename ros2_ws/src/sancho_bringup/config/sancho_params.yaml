@@ -4,9 +4,9 @@ camera_node:
     frame_width: 640
     frame_height: 480
     publish_rate_hz: 30.0
-    hsv_lower: [18, 34, 0]      # calibrated via tools/calibrate_hsv.py
-    hsv_upper: [61, 255, 221]   # calibrated via tools/calibrate_hsv.py
-    roi_height_percent: 0.85    # extended for look-ahead (camera FOV: 5-26 cm in front)
+    hsv_lower: [101, 0, 0]      # calibrated via tools/calibrate_hsv.py (blue/purple/magenta trail)
+    hsv_upper: [180, 255, 255]  # calibrated via tools/calibrate_hsv.py
+    roi_height_percent: 0.40    # calibrated via tools/calibrate_hsv.py
     num_roi_strips: 3           # horizontal slices for multi-point line fit
     min_contour_area: 500       # px; blobs smaller than this are ignored
     morph_kernel_size: 5        # erosion/dilation kernel; increase on noisy images

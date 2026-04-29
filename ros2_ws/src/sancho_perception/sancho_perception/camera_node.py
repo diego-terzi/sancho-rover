@@ -13,9 +13,9 @@ class CameraNode(Node):
         self.declare_parameter('frame_width', 640)
         self.declare_parameter('frame_height', 480)
         self.declare_parameter('publish_rate_hz', 30.0)
-        self.declare_parameter('hsv_lower', [18, 34, 0])
-        self.declare_parameter('hsv_upper', [61, 255, 221])
-        self.declare_parameter('roi_height_percent', 0.85)
+        self.declare_parameter('hsv_lower', [101, 0, 0])
+        self.declare_parameter('hsv_upper', [180, 255, 255])
+        self.declare_parameter('roi_height_percent', 0.40)
         self.declare_parameter('num_roi_strips', 3)
         self.declare_parameter('min_contour_area', 500)
         self.declare_parameter('morph_kernel_size', 5)
@@ -161,9 +161,17 @@ class CameraNode(Node):
             for i in range(1, self.num_roi_strips):
                 y = roi_h - i * strip_h
                 cv2.line(roi, (0, y), (width, y), (80, 80, 80), 1)
-            cv2.imshow('ROI + detection', roi)
-            cv2.imshow('Mask', mask)
-            cv2.waitKey(1)
+            try:
+                cv2.imshow('ROI + detection', roi)
+                cv2.imshow('Mask', mask)
+                cv2.waitKey(1)
+            except cv2.error as e:
+                # No display available (typical in headless Docker). Disable
+                # debug rendering for the rest of this run instead of crashing.
+                self.get_logger().warn(
+                    f'cv2.imshow failed ({e}); disabling show_debug for this session'
+                )
+                self.show_debug = False
 
         self.frame_count += 1
         if self.frame_count % max(1, int(self.publish_rate_hz)) == 0:

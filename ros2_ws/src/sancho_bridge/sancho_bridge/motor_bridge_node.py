@@ -171,10 +171,14 @@ class MotorBridgeNode(Node):
         self.last_left_pwm = left
         self.last_right_pwm = right
 
-        # Telemetry — always publish, even in dry_run
+        # Telemetry — always publish, even in dry_run. Wrapped because on
+        # shutdown the publisher's context may already be invalid.
         tel = Int16MultiArray()
         tel.data = [int(left), int(right)]
-        self.pwm_pub.publish(tel)
+        try:
+            self.pwm_pub.publish(tel)
+        except Exception:
+            pass
 
         if self.dry_run:
             self.get_logger().info(f'[dry_run] set_motors(L={left:+4d}, R={right:+4d})')
