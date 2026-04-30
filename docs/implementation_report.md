@@ -566,73 +566,132 @@ This last scenario is the strongest available validation without hardware:
 
 ---
 
-## 7. Pending work
+## 7. Deployment architecture (live on the rover)
 
-### 7.1 MCU firmware rewrite (highest priority)
+The development sections above describe the software-in-the-loop story. The
+following describes how the same code runs on real hardware on the Arduino
+UNO Q. The step-by-step operational sequence lives in
+[`deployment.md`](deployment.md); this section explains *why* the runtime is
+shaped the way it is.
 
-[`arduino/sancho_bridge/sancho_bridge.ino`](../arduino/sancho_bridge/sancho_bridge.ino)
-still drives the rejected L298N (`IN1/IN2` direction pins + `EN` PWM). It must
-be rewritten for the **BTS7960** module ("IBT-2"), which has a different
-control interface: `RPWM` + `LPWM` + `R_EN` + `L_EN` per channel. The
-`set_motors(left, right)` RPC interface stays the same — only the internal
-`applyMotor()` function changes — so `motor_bridge_node` (Python) does not
-need any modification.
+### 7.1 The three-process layout
 
-Information needed to start this work is enumerated in the README under
-"What's next" §1.
-
-### 7.2 `sensor_node`
-
-A fourth runtime node that listens for the MCU's Bridge notifications
-(`distance` from the HC-SR04, `gyro_z` from the MPU-6050) and republishes them
-as `/scan` (`sensor_msgs/Range`) and `/imu/data` (`sensor_msgs/Imu`). Once
-this exists:
-- The controller's `OBSTACLE_STOP` branch becomes active.
-- IMU data is available for future heading control / odometry.
-
-### 7.3 On-bench motor calibration
-
-To be done **after** the firmware compiles and motors spin:
-
-1. Find `deadband_pwm` empirically: ramp PWM from 0 upward until each track
-   *just* starts moving on a level surface; record the value.
-2. Verify `invert_left` / `invert_right`: command `linear.x = 0.1` and check
-   both tracks go forward.
-3. Calibrate `left_scale` / `right_scale` if the rover drifts on a straight
-   command.
-4. Optionally measure real `v_max` (timed run over a known distance) and
-   correct `motor_rpm` so the kinematic mapping reflects loaded conditions.
-
-### 7.4 Feed-forward on `/trail_heading` (curve anticipation)
-
-The controller currently uses only the lateral error. With the camera's short
-look-ahead (~21 cm of useful ground strip; see §5.1), a purely reactive PID
-will turn late on curves and tend to cut corners on the inside.
-
-`camera_node` already publishes `/trail_heading` (radians) — the slope of the
-multi-strip fitted line — but the controller does not consume it. A feed-forward
-term
+Once on the rover, three processes co-operate:
 
 ```
-u = K_p ε + K_i ∫ε + K_d dε/dt + K_ff · heading
+┌─ ROS 2 container (sancho_rover image) ──────────────────────────────┐
+│   camera_node  →  controller_node  →  motor_bridge_node             │
+│                                            │                        │
+│                                            │ UDP /16-bit L,R/        │
+│                                            ▼                        │
+└────────────────────────────────────────────┼────────────────────────┘
+                                             │ rover1-main-1:9001
+                                             │ (rover1_default bridge net)
+┌─ App Lab Python container (rover1-main-1) ─┼───────────────────────┐
+│                                            ▼                       │
+│   socket.recv(...) → Bridge.notify("set_motors", L, R)              │
+└────────────────────────────────────────────┼───────────────────────┘
+                                             │ /var/run/arduino-router.sock
+                                             ▼
+┌─ arduino-router (Linux daemon, /dev/ttyHS1 owner) ─────────────────┐
+│   MessagePack-RPC over UART, 115200 baud                            │
+└────────────────────────────────────────────┼───────────────────────┘
+                                             │
+                                             ▼
+                                       STM32U585 MCU
+                                       (sketch.ino)
 ```
 
-would let the rover proactively rotate based on where the trail is *going*, not
-just where it currently is. This is the most cost-effective improvement
-identified for curve handling and should be the next behavioural change.
+### 7.2 Why the UDP shim exists
 
-### 7.5 Live parameter updates in `controller_node`
+The Arduino UNO Q exposes its inter-processor communication through the
+`arduino-router` Linux service that owns `/dev/ttyHS1` (115 200 baud, MsgPack
+RPC framing). The Python client lives in `arduino.app_utils.Bridge`, which is
+**only installed in the per-app virtualenv created by App Lab** under
+`/var/lib/arduino-app-cli/<app>/.cache/.venv/`. There is no
+system-wide install path and no published PyPI package we could depend on
+inside our Docker image.
 
-The PID gains are currently read once at startup. `ros2 param set` will update
-the parameter store but the node won't re-read the value. For tuning, this is
-unergonomic — a `set_parameters_callback` hook would let live re-tuning work.
+Two options were considered:
 
-### 7.6 Documentation updates
+1. **Install `arduino.app_utils` into the ROS 2 Docker image directly.** This
+   would require copying the per-app venv contents (and its native deps) into
+   the image, and mounting `/var/run/arduino-router.sock` at runtime. Tightly
+   couples our build to App Lab internals that aren't part of any stable API,
+   and would break the moment Arduino updates the SDK.
+2. **Run a small App Lab Python app whose only job is to forward UDP to
+   `Bridge.notify`.** Decouples our build from App Lab entirely.
 
-[`docs/architecture.md`](architecture.md) was written for the original single-
-package layout (`sancho_rover`) and the L298N driver. It needs a pass to match
-the current 4-package structure, the IBT-2 driver decision, and the new
-runtime topics (`/motor_pwm`, `/trail_heading`).
+We chose option 2. The shim is 30 lines of code
+([`arduino/sancho_bridge/python/main.py`](../arduino/sancho_bridge/python/main.py))
+and lets each side speak its native language: the ROS 2 stack ships standard
+ROS 2 message types, App Lab ships an App Lab app, neither knows about the
+other.
+
+### 7.3 Why `--network rover1_default` (not `--network host`)
+
+App Lab runs each App Lab app inside its own Docker container on a private
+bridge network whose name is derived from the app name (`rover1` →
+`rover1_default`). The Python listener inside that container sees only its
+own loopback (`127.0.0.1` of the bridge network namespace), so a
+`--network host` ROS 2 container would not be able to reach it on `127.0.0.1`.
+
+Two fixes:
+
+- **Make the ROS 2 container join `rover1_default`** — what we do.
+  Docker's embedded DNS then resolves the App Lab container by name
+  (`rover1-main-1`) without hard-coding an IP.
+- **Make App Lab's container use `--network host`** — would require editing
+  App Lab's auto-generated docker-compose, which we don't own.
+
+The cost of joining the bridge net is that ROS 2 DDS traffic stays inside the
+bridge — external machines can no longer `ros2 topic echo` on the rover. For
+debugging we `docker exec` into the container instead.
+
+### 7.4 Three-layer motor safety
+
+| Layer | Where | Trigger | Time to stop |
+|---|---|---|---|
+| 1. Python watchdog | `motor_bridge_node` in Docker | No `/cmd_vel` for `watchdog_timeout` (0.5 s) | within 1 cycle of the 20 Hz watchdog timer |
+| 2. MCU watchdog | `sketch.ino` `loop()` | No `set_motors()` for `MOTOR_WATCHDOG_MS` (500 ms) | every iteration of the MCU loop, ~µs |
+| 3. PWM = 0 = coast | BTS7960 hardware | Both PWM inputs at zero | instantaneous: half-bridges off |
+
+Layer 1 fires when the controller dies. Layer 2 fires when the entire MPU
+side dies (Docker, App Lab, or both). Layer 3 is the natural electrical
+behaviour at PWM 0 — no braking, motors simply drift to a stop.
+
+### 7.5 Headless-aware perception
+
+Inside the Docker container there is no X server. Calling `cv2.imshow` would
+abort the camera_node process via Qt's xcb plugin (a hard `abort()`, not a
+catchable exception). The node detects the missing `DISPLAY` env var during
+init and disables debug rendering before the timer fires. On the developer
+laptop the env var is set, so the debug windows appear normally.
+
+### 7.6 Pending work
+
+The MCU firmware (originally in this list as the highest-priority task) is
+**done** — see [`arduino/sancho_bridge/sketch/sketch.ino`](../arduino/sancho_bridge/sketch/sketch.ino).
+Remaining work:
+
+- **`sensor_node`**: a fourth runtime node that listens for Bridge
+  notifications from the MCU (HC-SR04 distance, MPU-6050 gyro Z) and
+  republishes them as `/scan` and `/imu/data`. Once it exists,
+  `controller_node`'s `OBSTACLE_STOP` branch becomes active. Firmware-side
+  the sensors have to be re-added to `sketch.ino` (currently motor-only).
+- **On-rover motor calibration**: bench-tune `deadband_pwm` (expect 40–80
+  for this chassis), verify `invert_left/right`, optionally calibrate
+  `left_scale/right_scale` for asymmetric tracks, optionally measure real
+  loaded `v_max` and update `motor_rpm` accordingly.
+- **Feed-forward on `/trail_heading`** (see §5.1): the camera already
+  publishes the trail's slope; wiring it into the PID as
+  `u += K_ff · heading` would meaningfully improve curve anticipation given
+  the camera's ~21 cm look-ahead.
+- **Live parameter updates in `controller_node`**: a
+  `set_parameters_callback` would let `ros2 param set` re-tune PID gains
+  without restarting the node.
+- **Documentation cleanup**: [`docs/architecture.md`](architecture.md) still
+  references the original single-package layout and L298N driver.
 
 ---
 
@@ -644,9 +703,13 @@ runtime topics (`/motor_pwm`, `/trail_heading`).
 | Controller node | [`controller_node.py`](../ros2_ws/src/sancho_control/sancho_control/controller_node.py) |
 | Motor bridge node | [`motor_bridge_node.py`](../ros2_ws/src/sancho_bridge/sancho_bridge/motor_bridge_node.py) |
 | Simulator node | [`sim_node.py`](../ros2_ws/src/sancho_perception/sancho_perception/sim_node.py) |
+| MCU firmware (BTS7960) | [`sketch.ino`](../arduino/sancho_bridge/sketch/sketch.ino) |
+| App Lab UDP→Bridge shim | [`main.py`](../arduino/sancho_bridge/python/main.py) |
 | HSV calibration tool | [`calibrate_hsv.py`](../tools/calibrate_hsv.py) |
 | Launch file | [`sancho_launch.py`](../ros2_ws/src/sancho_bringup/launch/sancho_launch.py) |
 | Parameter YAML | [`sancho_params.yaml`](../ros2_ws/src/sancho_bringup/config/sancho_params.yaml) |
+| Dockerfile | [`Dockerfile`](../docker/Dockerfile) |
+| Deployment guide | [`deployment.md`](deployment.md) |
 | Target architecture | [`architecture.md`](architecture.md) |
 | User-facing quickstart | [`README.md`](../README.md) |
 
