@@ -10,53 +10,46 @@
 //   2) MCU watchdog here           — independent watchdog at the firmware level
 //   3) BTS7960 with PWM = 0        — half-bridges off → motors coast
 //
-// Wiring strategy (Strategy A, simplest):
-//   On each BTS7960 module, R_EN and L_EN are tied directly to the module's
-//   +5 V supply (always enabled). The MCU only drives the two PWM inputs per
-//   module. R_IS and L_IS (current sense) are left unconnected for now.
-//   Total MCU pins used: 4 (all PWM-capable).
+// Wiring (Strategy A): on each BTS7960 module, R_EN and L_EN are tied directly
+// to the module's +5 V (always enabled). The MCU only drives the two PWM
+// inputs per module. R_IS / L_IS (current sense) left unconnected.
 //
-// Sensors: not yet integrated in this revision.
+// Pin assignments — naming convention:
+//   The macros are named for the *direction* the motor moves when that pin
+//   is driven, NOT for the BTS7960 input name (RPWM/LPWM). On this rover the
+//   right motor is wired with reversed polarity (M+/M- swapped on the
+//   BTS7960), so its "forward" pin happens to be the LPWM input of the right
+//   module. The macros hide that detail from the rest of the firmware.
+//
+//   Pin numbers verified with the bench-test sketch (3-second forward / pivot
+//   cycle) on the actual rover.
 
 #include "Arduino_RouterBridge.h"
 
-// ── BTS7960 control pins ──────────────────────────────────────────────────────
-// All four must be PWM-capable. On Arduino UNO Q, pins 5/6/9/10 are PWM.
-// 11/12 are intentionally left free for future HC-SR04, A4/A5 for I²C.
-#define LEFT_RPWM    5      // PWM forward, left  motor
-#define LEFT_LPWM    6      // PWM reverse, left  motor
-#define RIGHT_RPWM  10      // PWM forward, right motor — swapped vs left to match wiring
-#define RIGHT_LPWM   9      // PWM reverse, right motor
+// ── Direction-named pin assignments ──────────────────────────────────────────
+#define LEFT_FWD_PIN   10   // LEFT  motor → BTS7960 RPWM input
+#define LEFT_REV_PIN    9   // LEFT  motor → BTS7960 LPWM input
+#define RIGHT_FWD_PIN   6   // RIGHT motor → BTS7960 LPWM input  (motor wired reversed)
+#define RIGHT_REV_PIN   5   // RIGHT motor → BTS7960 RPWM input  (motor wired reversed)
 
 // ── MCU-side watchdog ─────────────────────────────────────────────────────────
-// If the MPU stops calling set_motors() for this long, the MCU autonomously
-// zeroes the PWMs. This is the second of the three safety layers and protects
-// against a frozen / crashed Python side that the MPU-side watchdog could miss.
 #define MOTOR_WATCHDOG_MS  500UL
 
 unsigned long lastSetMotorsMs = 0;
 
 // Forward declarations
-void applyMotor(int rpwm_pin, int lpwm_pin, int pwm);
+void applyMotor(int fwd_pin, int rev_pin, int pwm);
 void stopMotors();
 
 // ── RPC handlers (called by Bridge.provide_safe) ─────────────────────────────
-//
-// IMPORTANT: with provide_safe, these run in the loop() context, so we can use
-// analogWrite freely. Per Arduino docs, do NOT call Bridge.call() or
-// Monitor.print() from inside a provide()/provide_safe() callback — it can
-// deadlock the bridge.
-
 void setMotors(int left, int right) {
-    applyMotor(LEFT_RPWM,  LEFT_LPWM,  left);
-    applyMotor(RIGHT_RPWM, RIGHT_LPWM, right);
+    applyMotor(LEFT_FWD_PIN,  LEFT_REV_PIN,  left);
+    applyMotor(RIGHT_FWD_PIN, RIGHT_REV_PIN, right);
     lastSetMotorsMs = millis();
 }
 
 void emergencyStop() {
     stopMotors();
-    // Reset the watchdog timestamp so the loop continues to enforce stop
-    // until a fresh set_motors() call explicitly resumes operation.
     lastSetMotorsMs = 0;
 }
 
@@ -66,10 +59,10 @@ void setup() {
     Bridge.begin();
     Monitor.begin();
 
-    pinMode(LEFT_RPWM,  OUTPUT);
-    pinMode(LEFT_LPWM,  OUTPUT);
-    pinMode(RIGHT_RPWM, OUTPUT);
-    pinMode(RIGHT_LPWM, OUTPUT);
+    pinMode(LEFT_FWD_PIN,  OUTPUT);
+    pinMode(LEFT_REV_PIN,  OUTPUT);
+    pinMode(RIGHT_FWD_PIN, OUTPUT);
+    pinMode(RIGHT_REV_PIN, OUTPUT);
 
     stopMotors();  // safe default before the first MPU command arrives
 
@@ -91,24 +84,24 @@ void loop() {
 
 // ── Motor helpers ─────────────────────────────────────────────────────────────
 
-// BTS7960 dual-PWM control. Convention:
-//   FORWARD (pwm > 0) : RPWM = |pwm|, LPWM = 0
-//   REVERSE (pwm < 0) : RPWM = 0,     LPWM = |pwm|
-//   STOP    (pwm = 0) : both pins 0  (coast — half-bridges off, no braking)
-void applyMotor(int rpwm_pin, int lpwm_pin, int pwm) {
+// Direction-symmetric drive.
+//   FORWARD (pwm > 0): fwd_pin = |pwm|, rev_pin = 0
+//   REVERSE (pwm < 0): fwd_pin = 0,     rev_pin = |pwm|
+//   STOP    (pwm = 0): both pins 0  (coast — half-bridges off, no braking)
+void applyMotor(int fwd_pin, int rev_pin, int pwm) {
     pwm = constrain(pwm, -255, 255);
     if (pwm >= 0) {
-        analogWrite(rpwm_pin, pwm);
-        analogWrite(lpwm_pin, 0);
+        analogWrite(fwd_pin, pwm);
+        analogWrite(rev_pin, 0);
     } else {
-        analogWrite(rpwm_pin, 0);
-        analogWrite(lpwm_pin, -pwm);
+        analogWrite(fwd_pin, 0);
+        analogWrite(rev_pin, -pwm);
     }
 }
 
 void stopMotors() {
-    analogWrite(LEFT_RPWM,  0);
-    analogWrite(LEFT_LPWM,  0);
-    analogWrite(RIGHT_RPWM, 0);
-    analogWrite(RIGHT_LPWM, 0);
+    analogWrite(LEFT_FWD_PIN,  0);
+    analogWrite(LEFT_REV_PIN,  0);
+    analogWrite(RIGHT_FWD_PIN, 0);
+    analogWrite(RIGHT_REV_PIN, 0);
 }
