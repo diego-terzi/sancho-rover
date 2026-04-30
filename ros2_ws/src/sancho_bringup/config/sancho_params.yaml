@@ -4,8 +4,8 @@ camera_node:
     frame_width: 640
     frame_height: 480
     publish_rate_hz: 30.0
-    hsv_lower: [101, 0, 0]      # calibrated via tools/calibrate_hsv.py (blue/purple/magenta trail)
-    hsv_upper: [180, 255, 255]  # calibrated via tools/calibrate_hsv.py
+    hsv_lower: [0, 0, 0]        # calibrated via tools/calibrate_hsv.py (red/orange/yellow trail)
+    hsv_upper: [68, 255, 255]   # calibrated via tools/calibrate_hsv.py
     roi_height_percent: 0.40    # calibrated via tools/calibrate_hsv.py
     num_roi_strips: 3           # horizontal slices for multi-point line fit
     min_contour_area: 500       # px; blobs smaller than this are ignored
