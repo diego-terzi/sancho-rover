@@ -1,17 +1,23 @@
 """
-Controller node: converts trail_error + obstacle distance into /cmd_vel.
+Controller node: converts trail_error + trail_heading + obstacle distance into /cmd_vel.
 
 State machine (see docs/architecture.md §5):
-    FOLLOWING       PID runs, Twist with linear.x + angular.z correction.
+    FOLLOWING       PID + heading feed-forward, adaptive linear speed.
     TRAIL_LOST      No valid trail for > trail_lost_timeout: stop.
     OBSTACLE_STOP   Front distance < obstacle_distance_m: stop (top priority).
 
+Control law on FOLLOWING:
+    angular.z = -(Kp*err + Ki*∫err + Kd*ḋerr + heading_ff_gain * heading)
+    linear.x  = max_speed - (max_speed - min_speed) * curvature
+                where curvature = clamp(max(|err|, |heading|) * curve_slowdown_gain, 0, 1)
+
 Inputs:
-    /trail_error (std_msgs/Float32)     -1..+1, NaN when no trail.
-    /scan        (sensor_msgs/Range)    meters; optional (sensor_node TBD).
+    /trail_error   (std_msgs/Float32)   -1..+1, NaN when no trail.
+    /trail_heading (std_msgs/Float32)   rad, NaN when single-strip detection.
+    /scan          (sensor_msgs/Range)  meters; optional (sensor_node TBD).
 
 Output:
-    /cmd_vel     (geometry_msgs/Twist)  published at control_rate_hz.
+    /cmd_vel       (geometry_msgs/Twist) published at control_rate_hz.
 """
 
 import math
@@ -35,10 +41,13 @@ class ControllerNode(Node):
         super().__init__('controller_node')
 
         # Parameters
-        self.declare_parameter('pid_kp', 1.0)
+        self.declare_parameter('pid_kp', 1.5)
         self.declare_parameter('pid_ki', 0.0)
-        self.declare_parameter('pid_kd', 0.0)
-        self.declare_parameter('base_speed', 0.3)
+        self.declare_parameter('pid_kd', 0.1)
+        self.declare_parameter('min_speed', 0.5)
+        self.declare_parameter('max_speed', 0.9)
+        self.declare_parameter('heading_ff_gain', 1.5)
+        self.declare_parameter('curve_slowdown_gain', 1.5)
         self.declare_parameter('trail_lost_timeout', 2.0)
         self.declare_parameter('obstacle_distance_m', 0.3)
         self.declare_parameter('control_rate_hz', 20.0)
@@ -47,7 +56,10 @@ class ControllerNode(Node):
         self.kp = float(self.get_parameter('pid_kp').value)
         self.ki = float(self.get_parameter('pid_ki').value)
         self.kd = float(self.get_parameter('pid_kd').value)
-        self.base_speed = float(self.get_parameter('base_speed').value)
+        self.min_speed = float(self.get_parameter('min_speed').value)
+        self.max_speed = float(self.get_parameter('max_speed').value)
+        self.heading_ff_gain = float(self.get_parameter('heading_ff_gain').value)
+        self.curve_slowdown_gain = float(self.get_parameter('curve_slowdown_gain').value)
         self.trail_lost_timeout = float(self.get_parameter('trail_lost_timeout').value)
         self.obstacle_distance_m = float(self.get_parameter('obstacle_distance_m').value)
         self.control_rate_hz = float(self.get_parameter('control_rate_hz').value)
@@ -55,12 +67,14 @@ class ControllerNode(Node):
 
         # I/O
         self.create_subscription(Float32, 'trail_error', self._on_trail_error, 10)
+        self.create_subscription(Float32, 'trail_heading', self._on_trail_heading, 10)
         self.create_subscription(Range, 'scan', self._on_scan, 10)
         self.cmd_pub = self.create_publisher(Twist, 'cmd_vel', 10)
 
         # Latest data — stashed by callbacks, consumed by the control loop
         self.last_valid_error = 0.0
         self.last_valid_time = None
+        self.last_heading = 0.0
         self.last_distance = float('inf')
         self.last_distance_time = None
 
@@ -69,17 +83,18 @@ class ControllerNode(Node):
         self.integral = 0.0
 
         # State machine
-        self.current_state = State.TRAIL_LOST  # start stopped until we see a trail
+        self.current_state = State.TRAIL_LOST
 
         self.dt = 1.0 / self.control_rate_hz
         self.timer = self.create_timer(self.dt, self._control_step)
 
-        self._tick = 0  # for throttled logging
+        self._tick = 0
 
         self.get_logger().info(
             f'Controller started @ {self.control_rate_hz} Hz | '
             f'Kp={self.kp} Ki={self.ki} Kd={self.kd} | '
-            f'base={self.base_speed} m/s | '
+            f'speed={self.min_speed}..{self.max_speed} m/s | '
+            f'ff={self.heading_ff_gain} slow={self.curve_slowdown_gain} | '
             f'lost_timeout={self.trail_lost_timeout} s | '
             f'obstacle<{self.obstacle_distance_m} m'
         )
@@ -90,6 +105,10 @@ class ControllerNode(Node):
         if not math.isnan(msg.data):
             self.last_valid_error = float(msg.data)
             self.last_valid_time = self.get_clock().now()
+
+    def _on_trail_heading(self, msg: Float32):
+        # NaN = single-strip detection (no line fit) → fall back to no feed-forward
+        self.last_heading = 0.0 if math.isnan(msg.data) else float(msg.data)
 
     def _on_scan(self, msg: Range):
         self.last_distance = float(msg.range)
@@ -104,7 +123,6 @@ class ControllerNode(Node):
         return age_s <= self.trail_lost_timeout
 
     def _obstacle_is_close(self) -> bool:
-        # No scan yet (sensor_node not running) — don't block on phantom obstacles
         if self.last_distance_time is None:
             return False
         return self.last_distance < self.obstacle_distance_m
@@ -133,10 +151,12 @@ class ControllerNode(Node):
                 self.prev_error = self.last_valid_error
             self.current_state = next_state
 
-        cmd = Twist()  # defaults to all-zero
+        cmd = Twist()
 
         if self.current_state == State.FOLLOWING:
             error = self.last_valid_error
+            heading = self.last_heading
+
             self.integral += error * self.dt
             derivative = (error - self.prev_error) / self.dt
             self.prev_error = error
@@ -145,23 +165,30 @@ class ControllerNode(Node):
                 self.kp * error
                 + self.ki * self.integral
                 + self.kd * derivative
+                + self.heading_ff_gain * heading
             )
-            # Positive error = trail is right of center → rover must turn right →
-            # angular.z must be negative (ROS REP-103: +z is CCW / left turn).
+            # Positive error/heading = trail to the right → turn right →
+            # angular.z negative (ROS REP-103: +z is CCW / left turn).
             angular_z = -angular_correction
             angular_z = max(-self.max_angular_z, min(self.max_angular_z, angular_z))
 
-            cmd.linear.x = self.base_speed
+            curvature = min(
+                1.0,
+                max(abs(error), abs(heading)) * self.curve_slowdown_gain,
+            )
+            speed = self.max_speed - (self.max_speed - self.min_speed) * curvature
+
+            cmd.linear.x = speed
             cmd.angular.z = angular_z
 
         self.cmd_pub.publish(cmd)
 
-        # Throttled status log — once per second at 20 Hz
         self._tick += 1
         if self._tick % int(self.control_rate_hz) == 0:
             self.get_logger().info(
                 f'[{self.current_state.name}] '
                 f'err={self.last_valid_error:+.3f} '
+                f'hdg={self.last_heading:+.3f} '
                 f'cmd.lin={cmd.linear.x:.2f} cmd.ang={cmd.angular.z:+.3f}'
             )
 

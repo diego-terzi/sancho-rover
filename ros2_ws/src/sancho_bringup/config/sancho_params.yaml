@@ -16,14 +16,17 @@ camera_node:
 
 controller_node:
   ros__parameters:
-    pid_kp: 1.0              # TODO: tune
-    pid_ki: 0.0              # TODO: tune
-    pid_kd: 0.0              # TODO: tune
-    base_speed: 0.3          # m/s forward speed while FOLLOWING; TODO: tune
-    trail_lost_timeout: 2.0  # seconds of NaN/silence before declaring TRAIL_LOST
-    obstacle_distance_m: 0.3 # meters; below this => OBSTACLE_STOP (needs sensor_node)
-    control_rate_hz: 20.0    # Twist publish rate; also the PID dt
-    max_angular_z: 2.0       # rad/s clamp on PID output
+    pid_kp: 1.5                # PID on lateral trail error
+    pid_ki: 0.0
+    pid_kd: 0.1                # mild damping at higher speeds
+    min_speed: 0.5             # m/s; floor on tight curves
+    max_speed: 0.9             # m/s on straights (physical max ≈ 1.05 m/s)
+    heading_ff_gain: 1.5       # feed-forward: rad/s of angular per rad of /trail_heading
+    curve_slowdown_gain: 1.5   # |err| or |heading| at which speed → min_speed
+    trail_lost_timeout: 2.0    # seconds of NaN/silence before TRAIL_LOST
+    obstacle_distance_m: 0.3   # meters; below this => OBSTACLE_STOP (needs sensor_node)
+    control_rate_hz: 20.0      # Twist publish rate; also the PID dt
+    max_angular_z: 2.0         # rad/s clamp on PID output
 
 motor_bridge_node:
   ros__parameters:
