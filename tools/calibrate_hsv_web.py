@@ -140,7 +140,7 @@ HTML = """<!doctype html>
         <div><label>S max</label><input id=s_max type=range min=0 max=255 value=255 oninput=u()><span id=s_max_v class=value>255</span></div>
         <div><label>V min</label><input id=v_min type=range min=0 max=255 value=0 oninput=u()><span id=v_min_v class=value>0</span></div>
         <div><label>V max</label><input id=v_max type=range min=0 max=255 value=255 oninput=u()><span id=v_max_v class=value>255</span></div>
-        <div><label>ROI %</label><input id=roi_pct type=range min=5 max=100 value=40 oninput=u()><span id=roi_pct_v class=value>40</span></div>
+        <div><label>ROI %%</label><input id=roi_pct type=range min=5 max=100 value=40 oninput=u()><span id=roi_pct_v class=value>40</span></div>
         <button onclick=cp()>Copy YAML to clipboard</button>
         <pre id=out>(adjust sliders, then click "Copy YAML")</pre>
       </div>
