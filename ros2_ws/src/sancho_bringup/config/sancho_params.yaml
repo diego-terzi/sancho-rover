@@ -47,3 +47,12 @@ motor_bridge_node:
     udp_target_host: rover1-main-1  # App Lab container hostname; container name is <appname>-main-1
     udp_target_port: 9001
     dry_run: false             # set true to skip UDP send (kinematics-only test)
+
+sensor_node:
+  ros__parameters:
+    udp_listen_host: 0.0.0.0
+    udp_listen_port: 9002       # App Lab Python shim sends HC-SR04 readings here
+    frame_id: ultrasonic_front
+    field_of_view_rad: 0.26     # ~15° HC-SR04 cone
+    min_range_m: 0.02
+    max_range_m: 4.0

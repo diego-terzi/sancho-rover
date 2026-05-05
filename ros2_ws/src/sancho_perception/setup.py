@@ -18,6 +18,7 @@ setup(
         'console_scripts': [
             'camera_node = sancho_perception.camera_node:main',
             'sim_node = sancho_perception.sim_node:main',
+            'sensor_node = sancho_perception.sensor_node:main',
         ],
     },
 )

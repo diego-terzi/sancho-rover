@@ -32,14 +32,22 @@
 #define RIGHT_FWD_PIN   6   // RIGHT motor → BTS7960 LPWM input  (motor wired reversed)
 #define RIGHT_REV_PIN   5   // RIGHT motor → BTS7960 RPWM input  (motor wired reversed)
 
+// ── HC-SR04 ultrasonic (front) ───────────────────────────────────────────────
+#define ULTRASONIC_TRIG_PIN     7
+#define ULTRASONIC_ECHO_PIN     8
+#define ULTRASONIC_PERIOD_MS    50UL    // ~20 Hz sampling
+#define ULTRASONIC_TIMEOUT_US   25000UL // ~4 m max round-trip; pulseIn returns 0 on timeout
+
 // ── MCU-side watchdog ─────────────────────────────────────────────────────────
 #define MOTOR_WATCHDOG_MS  500UL
 
-unsigned long lastSetMotorsMs = 0;
+unsigned long lastSetMotorsMs    = 0;
+unsigned long lastUltrasonicMs   = 0;
 
 // Forward declarations
 void applyMotor(int fwd_pin, int rev_pin, int pwm);
 void stopMotors();
+uint16_t readUltrasonicCm();
 
 // ── RPC handlers (called by Bridge.provide_safe) ─────────────────────────────
 void setMotors(int left, int right) {
@@ -64,6 +72,10 @@ void setup() {
     pinMode(RIGHT_FWD_PIN, OUTPUT);
     pinMode(RIGHT_REV_PIN, OUTPUT);
 
+    pinMode(ULTRASONIC_TRIG_PIN, OUTPUT);
+    pinMode(ULTRASONIC_ECHO_PIN, INPUT);
+    digitalWrite(ULTRASONIC_TRIG_PIN, LOW);
+
     stopMotors();  // safe default before the first MPU command arrives
 
     Bridge.provide_safe("set_motors",     setMotors);
@@ -79,6 +91,16 @@ void loop() {
     // wrap-safe because both operands are unsigned long.
     if (millis() - lastSetMotorsMs > MOTOR_WATCHDOG_MS) {
         stopMotors();
+    }
+
+    // Ultrasonic sampling, ~20 Hz. pulseIn() can block up to ULTRASONIC_TIMEOUT_US
+    // (~25 ms) on no-echo, but the Bridge serial RX is interrupt-driven so this
+    // does not delay incoming RPC calls. The motor watchdog tolerance is 500 ms,
+    // ten times longer, so a few stalled cycles are still safe.
+    if (millis() - lastUltrasonicMs > ULTRASONIC_PERIOD_MS) {
+        lastUltrasonicMs = millis();
+        uint16_t cm = readUltrasonicCm();
+        Bridge.notify("distance_cm", cm);
     }
 }
 
@@ -104,4 +126,22 @@ void stopMotors() {
     analogWrite(LEFT_REV_PIN,  0);
     analogWrite(RIGHT_FWD_PIN, 0);
     analogWrite(RIGHT_REV_PIN, 0);
+}
+
+// ── Ultrasonic helper ─────────────────────────────────────────────────────────
+
+// Returns the front distance in centimetres, or 0 if no echo arrived within
+// ULTRASONIC_TIMEOUT_US. The 0-as-out-of-range convention is interpreted by
+// sensor_node on the ROS side as "free space ahead" (mapped to max_range).
+uint16_t readUltrasonicCm() {
+    digitalWrite(ULTRASONIC_TRIG_PIN, LOW);
+    delayMicroseconds(2);
+    digitalWrite(ULTRASONIC_TRIG_PIN, HIGH);
+    delayMicroseconds(10);
+    digitalWrite(ULTRASONIC_TRIG_PIN, LOW);
+
+    unsigned long us = pulseIn(ULTRASONIC_ECHO_PIN, HIGH, ULTRASONIC_TIMEOUT_US);
+    if (us == 0) return 0;
+    // Speed of sound ≈ 343 m/s → 58 µs per cm round-trip.
+    return (uint16_t)(us / 58UL);
 }

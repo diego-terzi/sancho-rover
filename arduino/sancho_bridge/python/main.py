@@ -1,24 +1,29 @@
 """
-SANCHO App Lab Python — UDP-to-Bridge shim.
+SANCHO App Lab Python — bidirectional UDP-Bridge shim.
 
 Why this exists:
-  Our ROS 2 stack (camera_node, controller_node, motor_bridge_node) lives in
-  a Docker container because ROS 2 Jazzy doesn't have packages for the
-  QRB2210's Debian Trixie. The Arduino_RouterBridge Python client, on the
-  other hand, is part of Arduino's per-app virtualenvs and is hard to import
-  from inside Docker without dragging in App Lab's whole environment.
+  Our ROS 2 stack (camera_node, controller_node, motor_bridge_node, sensor_node)
+  lives in a Docker container because ROS 2 Jazzy doesn't have packages for the
+  QRB2210's Debian Trixie. The Arduino_RouterBridge Python client, on the other
+  hand, is part of Arduino's per-app virtualenvs and is hard to import from
+  inside Docker without dragging in App Lab's whole environment.
 
-  This shim resolves the impedance mismatch:
-    - Listens for UDP datagrams from Docker on 127.0.0.1:9001
-    - Each datagram is 2 little-endian int16: [left_pwm, right_pwm]
-    - Forwards each one to the MCU as Bridge.notify("set_motors", L, R)
+  This shim handles two flows:
 
-  motor_bridge_node (Python in Docker) keeps its full safety logic
-  (kinematics, watchdog, telemetry); the only thing it offloads is the
-  final hop to the MCU.
+    1. Motor commands  (Docker → MCU)
+       UDP datagram on :9001  →  Bridge.notify("set_motors", L, R)
+       Packet: 2× int16 little-endian = [left_pwm, right_pwm]
 
-Run from Arduino App Lab as a normal app — the App Lab framework provides
-the arduino.app_utils module via its per-app venv.
+    2. Ultrasonic readings (MCU → Docker)
+       Bridge.subscribe("distance_cm")  →  UDP datagram to ROS host:9002
+       Packet: 1× uint16 little-endian = [distance_cm]
+
+  The destination address for flow (2) is *learned* from the source address of
+  flow (1) — every motor packet from Docker tells us where to reply. This means
+  no static IP wiring even if the Docker container restarts.
+
+Run from Arduino App Lab as a normal app — the App Lab framework provides the
+arduino.app_utils module via its per-app venv.
 """
 
 import socket
@@ -26,33 +31,66 @@ import struct
 
 from arduino.app_utils import App, Bridge
 
-UDP_HOST = "0.0.0.0"  # bind to all interfaces — App Lab runs us in its own container
-UDP_PORT = 9001
-PACKET_FMT = "<hh"               # 2 little-endian signed shorts: left, right
-PACKET_LEN = struct.calcsize(PACKET_FMT)
-RECV_TIMEOUT_S = 1.0              # blocking-ish recv; idle when no traffic
 
-_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-_sock.bind((UDP_HOST, UDP_PORT))
-_sock.settimeout(RECV_TIMEOUT_S)
-print(f"[sancho_bridge] UDP listener up on {UDP_HOST}:{UDP_PORT}, "
-      f"forwarding to MCU via Bridge.notify('set_motors', ...)")
+LISTEN_HOST       = "0.0.0.0"  # bind to all interfaces — App Lab runs us in its own container
+MOTOR_PORT        = 9001
+SENSOR_PORT       = 9002       # destination port on the ROS container
+
+MOTOR_FMT         = "<hh"      # 2 little-endian signed shorts: left, right
+MOTOR_LEN         = struct.calcsize(MOTOR_FMT)
+DISTANCE_FMT      = "<H"       # 1 little-endian unsigned short: distance in cm
+RECV_TIMEOUT_S    = 1.0
+
+
+_recv_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+_recv_sock.bind((LISTEN_HOST, MOTOR_PORT))
+_recv_sock.settimeout(RECV_TIMEOUT_S)
+
+_send_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+# IP address of the ROS container, learned from incoming motor packets so we
+# don't need to hard-code Docker's bridge-network address.
+_ros_ip = None
+
+
+def on_distance_cm(cm):
+    """Bridge handler invoked by the MCU's notify("distance_cm", value)."""
+    if _ros_ip is None:
+        return  # no ROS peer known yet — drop silently until first motor packet arrives
+    try:
+        cm_clamped = max(0, min(65535, int(cm)))
+        _send_sock.sendto(
+            struct.pack(DISTANCE_FMT, cm_clamped),
+            (_ros_ip, SENSOR_PORT),
+        )
+    except Exception as e:
+        print(f"[sancho_bridge] sensor forward failed: {e}")
+
+
+# Register the handler for MCU notifications. App Lab's Bridge mirrors the
+# MCU's provide/notify API on the Python side: subscribe() registers a callback
+# for events the MCU publishes via Bridge.notify(name, ...).
+Bridge.subscribe("distance_cm", on_distance_cm)
+
+
+print(f"[sancho_bridge] bidirectional UDP shim up | "
+      f"motors :{MOTOR_PORT} (Docker→MCU) | "
+      f"sensors :{SENSOR_PORT} (MCU→Docker, dest auto-learned)")
 
 
 def loop():
+    global _ros_ip
     try:
-        data, _ = _sock.recvfrom(64)
+        data, addr = _recv_sock.recvfrom(64)
     except socket.timeout:
         # No traffic — let the MCU's own 500 ms watchdog handle motor stop.
         return
 
-    if len(data) < PACKET_LEN:
+    if len(data) < MOTOR_LEN:
         return
 
-    left, right = struct.unpack(PACKET_FMT, data[:PACKET_LEN])
-    # Notify (fire-and-forget) is the right semantic for periodic motor
-    # updates: we don't need an ack, the next packet will overwrite, and
-    # if the MCU misses one we'll send another in 50 ms.
+    _ros_ip = addr[0]  # remember the ROS container's IP for the sensor reply path
+    left, right = struct.unpack(MOTOR_FMT, data[:MOTOR_LEN])
     Bridge.notify("set_motors", int(left), int(right))
 
 
