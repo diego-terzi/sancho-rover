@@ -30,14 +30,17 @@ controller_node:
 
 motor_bridge_node:
   ros__parameters:
-    wheel_separation: 0.265    # m, track center-to-center (measured)
-    wheel_diameter:   0.06     # m, driven sprocket (measured)
-    motor_rpm:        333.0    # measured: 333 RPM @ PWM 255 with 5 kg prototype load -> v_max ≈ 1.05 m/s
-    max_pwm:          255      # IBT-2 / BTS7960 is 8-bit PWM
-    deadband_pwm:     0        # TODO: tune on bench (expect 40-80 for a 24 kg tracked chassis)
-    invert_left:      false    # TODO: flip if left track runs backward on first test
-    invert_right:     false    # TODO: flip if right track runs backward on first test
-    left_scale:       1.0      # TODO: calibrate if tracks are asymmetric
+    # 4WD skid-steer: 2 motors per side (JGB37-545 rear, JGB37-520 front).
+    # Per-motor PWM scaling to match output speeds is handled in MCU firmware,
+    # not here — ROS sees a logical "left side" and "right side" only.
+    wheel_separation: 0.265    # m, lateral distance between left and right wheels
+    wheel_diameter:   0.06     # m, driven wheel diameter
+    motor_rpm:        300.0    # nominal output RPM of the slowest motor (545); v_max ≈ 0.94 m/s
+    max_pwm:          255      # BTS7960 is 8-bit PWM
+    deadband_pwm:     0        # TODO: tune on bench (expect 40-80 for a 24 kg loaded chassis)
+    invert_left:      false    # TODO: flip if left side runs backward on first test
+    invert_right:     false    # TODO: flip if right side runs backward on first test
+    left_scale:       1.0      # TODO: calibrate if left/right are asymmetric
     right_scale:      1.0
     watchdog_timeout: 0.5      # s; stop motors if no /cmd_vel for this long
     watchdog_rate_hz: 20.0
