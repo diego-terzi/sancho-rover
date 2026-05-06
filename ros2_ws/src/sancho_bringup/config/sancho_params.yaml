@@ -33,9 +33,9 @@ motor_bridge_node:
     # 4WD skid-steer: 2 motors per side (JGB37-545 rear, JGB37-520 front).
     # Per-motor PWM scaling to match output speeds is handled in MCU firmware,
     # not here — ROS sees a logical "left side" and "right side" only.
-    wheel_separation: 0.265    # m, lateral distance between left and right wheels
-    wheel_diameter:   0.06     # m, driven wheel diameter
-    motor_rpm:        300.0    # nominal output RPM of the slowest motor (545); v_max ≈ 0.94 m/s
+    wheel_separation: 0.265    # m, lateral distance between left and right wheels (unchanged on 4WD chassis)
+    wheel_diameter:   0.09     # m, driven wheel diameter (4WD chassis)
+    motor_rpm:        300.0    # nominal output RPM of the slowest motor (545); v_max ≈ 1.41 m/s
     max_pwm:          255      # BTS7960 is 8-bit PWM
     deadband_pwm:     0        # TODO: tune on bench (expect 40-80 for a 24 kg loaded chassis)
     invert_left:      false    # TODO: flip if left side runs backward on first test
