@@ -15,7 +15,7 @@ Why this exists:
        Packet: 2× int16 little-endian = [left_pwm, right_pwm]
 
     2. Ultrasonic readings (MCU → Docker)
-       Bridge.subscribe("distance_cm")  →  UDP datagram to ROS host:9002
+       Bridge.provide_safe("distance_cm")  →  UDP datagram to ROS host:9002
        Packet: 1× uint16 little-endian = [distance_cm]
 
   The destination address for flow (2) is *learned* from the source address of
@@ -67,10 +67,11 @@ def on_distance_cm(cm):
         print(f"[sancho_bridge] sensor forward failed: {e}")
 
 
-# Register the handler for MCU notifications. App Lab's Bridge mirrors the
-# MCU's provide/notify API on the Python side: subscribe() registers a callback
-# for events the MCU publishes via Bridge.notify(name, ...).
-Bridge.subscribe("distance_cm", on_distance_cm)
+# Register the handler for MCU notifications. App Lab's Bridge uses the same
+# provide_safe() name on both sides — Python provides a function the MCU calls
+# via Bridge.notify("distance_cm", value). This is the mirror of how the MCU
+# provides set_motors and Python notifies it.
+Bridge.provide_safe("distance_cm", on_distance_cm)
 
 
 print(f"[sancho_bridge] bidirectional UDP shim up | "
