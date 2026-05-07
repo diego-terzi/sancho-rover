@@ -50,8 +50,8 @@
 // ── HC-SR04 ultrasonic (front) ───────────────────────────────────────────────
 #define ULTRASONIC_TRIG_PIN     7
 #define ULTRASONIC_ECHO_PIN     8
-#define ULTRASONIC_PERIOD_MS    50UL    // ~20 Hz sampling
-#define ULTRASONIC_TIMEOUT_US   25000UL // ~4 m max round-trip; pulseIn returns 0 on timeout
+#define ULTRASONIC_PERIOD_MS    200UL   // 5 Hz sampling — leaves Bridge bandwidth for incoming set_motors
+#define ULTRASONIC_TIMEOUT_US   12000UL // ~2 m max round-trip; saturates obstacle decisions anyway
 
 // ── MCU-side watchdog ─────────────────────────────────────────────────────────
 #define MOTOR_WATCHDOG_MS  500UL
