@@ -58,6 +58,8 @@
 
 unsigned long lastSetMotorsMs    = 0;
 unsigned long lastUltrasonicMs   = 0;
+unsigned long lastSetMotorsLogMs = 0;
+uint32_t      setMotorsCallCount = 0;
 
 // Forward declarations
 void applyMotor(int rpwm_pin, int pwm);
@@ -77,6 +79,27 @@ void setMotors(int left, int right) {
     applyMotor(RIGHT_BACK_RPWM_PIN,  right_back);
 
     lastSetMotorsMs = millis();
+
+    // Diagnostic heartbeat — once every 5 s, prove that set_motors is being
+    // invoked at all and show the values reaching the MCU.
+    setMotorsCallCount++;
+    if (millis() - lastSetMotorsLogMs > 5000UL) {
+        lastSetMotorsLogMs = millis();
+        Monitor.print("[setMotors #");
+        Monitor.print(setMotorsCallCount);
+        Monitor.print("] L=");
+        Monitor.print(left);
+        Monitor.print(" R=");
+        Monitor.print(right);
+        Monitor.print(" -> LF=");
+        Monitor.print(left_front);
+        Monitor.print(" RF=");
+        Monitor.print(right_front);
+        Monitor.print(" LB=");
+        Monitor.print(left_back);
+        Monitor.print(" RB=");
+        Monitor.println(right_back);
+    }
 }
 
 void emergencyStop() {
@@ -97,6 +120,17 @@ void setup() {
     pinMode(ULTRASONIC_ECHO_PIN, INPUT);
     digitalWrite(ULTRASONIC_TRIG_PIN, LOW);
 
+    // Force PWM peripheral init on each motor pin with a brief non-zero
+    // pulse. On the UNO Q's Zephyr core, the first analogWrite() configures
+    // the timer with the requested duty cycle; if that first call is 0 the
+    // peripheral stays inert and subsequent non-zero calls don't drive the
+    // pin. PWM=1 for ~50 ms is far too low to spin a 12 V motor through
+    // a BTS7960, so this is mechanically inert.
+    analogWrite(LEFT_FRONT_RPWM_PIN,  1);
+    analogWrite(RIGHT_FRONT_RPWM_PIN, 1);
+    analogWrite(LEFT_BACK_RPWM_PIN,   1);
+    analogWrite(RIGHT_BACK_RPWM_PIN,  1);
+    delay(50);
     stopMotors();  // safe default before the first MPU command arrives
 
     Bridge.provide_safe("set_motors",     setMotors);

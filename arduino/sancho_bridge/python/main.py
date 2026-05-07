@@ -3,23 +3,23 @@ SANCHO App Lab Python — bidirectional UDP-Bridge shim.
 
 Two flows:
   1. Motor commands     (Docker → MCU)        UDP :9001 → Bridge.notify(...)
-  2. Ultrasonic readings (MCU → Docker)       Bridge handler → UDP :9002
+  2. Ultrasonic readings (MCU → Docker)       Bridge.provide handler → UDP :9002
 
-Flow 1 is rock-solid: Bridge.notify() is a known API. Flow 2 needs the
-Python side to register a handler for events the MCU sends via
-Bridge.notify("distance_cm", value) — and the exact name of that
-registration method on the Python side is undocumented in the App Lab
-material we have. So this script does runtime discovery: it tries the
-most likely candidate method names; if none work, the motor flow keeps
-running and we just lose obstacle detection (the rover drives but won't
-auto-stop in front of obstacles).
+Bridge API confirmed on hardware (May 2026):
+  Bridge methods are ['call', 'notify', 'provide', 'unprovide'].
+    notify(name, *args)   = send fire-and-forget event to MCU
+    provide(name, fn)     = register a Python handler for events from MCU
+    call(name, *args)     = synchronous RPC, waits for return value
+    unprovide(name)       = unregister handler
 
-Run from Arduino App Lab as a normal app — the framework provides
-arduino.app_utils via its per-app venv.
+The destination address for flow (2) is learned from the source of flow (1):
+every motor packet from Docker tells us where to reply, so no static IP
+wiring is needed.
 """
 
 import socket
 import struct
+import time
 
 from arduino.app_utils import App, Bridge
 
@@ -32,6 +32,7 @@ MOTOR_FMT      = "<hh"
 MOTOR_LEN      = struct.calcsize(MOTOR_FMT)
 DISTANCE_FMT   = "<H"
 RECV_TIMEOUT_S = 1.0
+HEARTBEAT_S    = 5.0
 
 
 _recv_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -40,7 +41,10 @@ _recv_sock.settimeout(RECV_TIMEOUT_S)
 
 _send_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
-_ros_ip = None  # learned from incoming motor packets
+_ros_ip = None
+_motor_count = 0
+_last_motor_log = 0.0
+_last_motor_lr = (0, 0)
 
 
 def on_distance_cm(cm):
@@ -57,51 +61,32 @@ def on_distance_cm(cm):
         print(f"[sancho_bridge] sensor forward failed: {e}")
 
 
-# ── Bridge API discovery ─────────────────────────────────────────────────────
-# Print every public method on the Bridge object so we can see, in App Lab's
-# log, what's actually available on this machine.
-_bridge_api = sorted(m for m in dir(Bridge) if not m.startswith('_'))
-print(f"[sancho_bridge] Bridge methods available: {_bridge_api}")
-
-# Try a list of plausible names for "register a Python handler for an MCU
-# notification". Whichever one works first wins; the others stay untouched.
-_registered_via = None
-for method_name in ('provide', 'subscribe', 'on', 'handle', 'register',
-                    'add_handler', 'add_listener', 'notify_handler',
-                    'provide_safe', 'register_callback'):
-    method = getattr(Bridge, method_name, None)
-    if not callable(method):
-        continue
-    try:
-        method("distance_cm", on_distance_cm)
-        _registered_via = method_name
-        break
-    except Exception as e:
-        print(f"[sancho_bridge] Bridge.{method_name}() raised: {e}")
-
-if _registered_via:
-    print(f"[sancho_bridge] distance_cm handler registered via Bridge.{_registered_via}()")
-else:
-    print("[sancho_bridge] WARNING: no working register API found — sensor flow disabled")
-    print("[sancho_bridge] Motor flow continues normally; OBSTACLE_STOP will not trigger.")
-
-# ── Main motor-forwarding loop ───────────────────────────────────────────────
+Bridge.provide("distance_cm", on_distance_cm)
 
 print(f"[sancho_bridge] shim up | motors :{MOTOR_PORT} (Docker→MCU) | "
       f"sensors :{SENSOR_PORT} (MCU→Docker, dest auto-learned)")
 
 
 def loop():
-    global _ros_ip
+    global _ros_ip, _motor_count, _last_motor_log, _last_motor_lr
     try:
         data, addr = _recv_sock.recvfrom(64)
     except socket.timeout:
         return
     if len(data) < MOTOR_LEN:
         return
+
     _ros_ip = addr[0]
     left, right = struct.unpack(MOTOR_FMT, data[:MOTOR_LEN])
     Bridge.notify("set_motors", int(left), int(right))
+
+    _motor_count += 1
+    _last_motor_lr = (int(left), int(right))
+    now = time.time()
+    if now - _last_motor_log >= HEARTBEAT_S:
+        _last_motor_log = now
+        print(f"[sancho_bridge] motor packets fwd'd: {_motor_count} "
+              f"(last L={_last_motor_lr[0]} R={_last_motor_lr[1]})")
 
 
 App.run(user_loop=loop)
