@@ -25,7 +25,10 @@
 #define LEFT_BACK_RPWM_PIN    10
 #define RIGHT_BACK_RPWM_PIN    3
 
-#define FRONT_SCALE  0.90f
+// Front motors: 333 RPM nominal; rear: 300 RPM nominal.
+// Scale front down so both axles advance at the same linear speed.
+// 300 / 333 = 0.9009...  (was 0.90, now using exact ratio)
+#define FRONT_SCALE  (300.0f / 333.0f)
 #define BACK_SCALE   1.00f
 
 // ── Watchdog ─────────────────────────────────────────────────────────────────
