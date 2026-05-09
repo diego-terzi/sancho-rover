@@ -56,7 +56,7 @@ RUN . /opt/ros/jazzy/setup.sh && \
 
 # ── entrypoint ───────────────────────────────────────────────────────────────
 # Source the ROS 2 underlay + our workspace overlay, then launch the full stack.
-ENTRYPOINT ["/bin/bash", "-c", \
-    "source /opt/ros/jazzy/setup.bash && \
-     source /ros2_ws/install/setup.bash && \
-     ros2 launch sancho_bringup sancho_launch.py"]
+# Any extra args on `docker run image_name <args>` are forwarded to ros2 launch
+# as launch arguments, e.g. `docker run ... sancho_rover:latest wheel_separation:=0.45`
+# overrides the wheel_separation parameter for that run only.
+ENTRYPOINT ["/bin/bash", "-c", "source /opt/ros/jazzy/setup.bash && source /ros2_ws/install/setup.bash && exec ros2 launch sancho_bringup sancho_launch.py \"$@\"", "--"]

@@ -1,5 +1,8 @@
 from launch import LaunchDescription
+from launch.actions import DeclareLaunchArgument
+from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 from ament_index_python.packages import get_package_share_directory
 import os
 
@@ -10,7 +13,20 @@ def generate_launch_description():
         'config',
         'sancho_params.yaml'
     )
+
+    # Quick-tuning launch argument for steering experiments. The default
+    # value matches the YAML; pass e.g. `wheel_separation:=0.45` on the
+    # launch (or docker run) command line to override the YAML for that
+    # run only — no rebuild needed.
+    wheel_separation_arg = DeclareLaunchArgument(
+        'wheel_separation', default_value='0.265',
+        description='Effective lateral wheel separation in metres. Inflate '
+                    'above the physical 0.265 to amplify steering on the '
+                    '4WD skid-steer rover (motors fight ground friction).',
+    )
+
     return LaunchDescription([
+        wheel_separation_arg,
         Node(
             package='sancho_perception',
             executable='camera_node',
@@ -29,7 +45,15 @@ def generate_launch_description():
             package='sancho_bridge',
             executable='motor_bridge_node',
             name='motor_bridge_node',
-            parameters=[config],
+            parameters=[
+                config,
+                {
+                    'wheel_separation': ParameterValue(
+                        LaunchConfiguration('wheel_separation'),
+                        value_type=float,
+                    ),
+                },
+            ],
             output='screen',
         ),
         Node(
