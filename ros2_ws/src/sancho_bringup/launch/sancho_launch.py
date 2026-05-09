@@ -19,10 +19,11 @@ def generate_launch_description():
     # launch (or docker run) command line to override the YAML for that
     # run only — no rebuild needed.
     wheel_separation_arg = DeclareLaunchArgument(
-        'wheel_separation', default_value='0.265',
-        description='Effective lateral wheel separation in metres. Inflate '
-                    'above the physical 0.265 to amplify steering on the '
-                    '4WD skid-steer rover (motors fight ground friction).',
+        'wheel_separation', default_value='0.45',
+        description='Effective lateral wheel separation in metres. Default '
+                    '0.45 is the value tuned on the rover; the physical '
+                    'separation is 0.265 but skid-steer needs it inflated to '
+                    'overcome the friction of the inner wheels in a turn.',
     )
 
     return LaunchDescription([
