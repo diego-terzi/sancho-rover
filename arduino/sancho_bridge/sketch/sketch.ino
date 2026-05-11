@@ -176,6 +176,10 @@ void updateCelebration() {
 
     if (!celebrating) return;
 
+    // LED stays solid on for the whole celebration window — it's a visual
+    // "mission complete" signal, not a beat indicator.
+    digitalWrite(LED_PIN, HIGH);
+
     // Riff finished
     if (celebStepIdx >= RIFF_STEPS) {
         celebrating = false;
@@ -193,13 +197,11 @@ void updateCelebration() {
         return;
     }
 
-    // Apply current step's output. Calling tone()/digitalWrite repeatedly with
-    // the same value is a no-op, so doing this every loop iteration is fine.
+    // The buzzer plays the note (or stays silent on a REST). The LED is
+    // handled above and remains on throughout.
     if (step.freq == REST) {
-        digitalWrite(LED_PIN, LOW);
         noTone(BUZZER_PIN);
     } else {
-        digitalWrite(LED_PIN, HIGH);
         tone(BUZZER_PIN, step.freq);
     }
 }
