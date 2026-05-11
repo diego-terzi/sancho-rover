@@ -200,11 +200,10 @@ void updateCelebration() {
     celebStepStartMs = millis();
 
     if (celebStepIdx >= RIFF_STEPS) {
-        // Riff finished
-        celebrating = false;
-        digitalWrite(LED_PIN, LOW);
-        noTone(BUZZER_PIN);
-        return;
+        // Riff finished — loop it from the start. LED stays on the whole
+        // time; the riff keeps replaying until the rover starts moving again
+        // (setMotors detects non-zero PWM and aborts celebration).
+        celebStepIdx = 0;
     }
 
     applyRiffStep(celebStepIdx);
