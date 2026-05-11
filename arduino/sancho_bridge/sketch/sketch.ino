@@ -161,6 +161,17 @@ void stopMotors() {
     analogWrite(RIGHT_BACK_RPWM_PIN,  0);
 }
 
+// Apply a step's buzzer output — called exactly once per step transition so
+// tone() is not restarted on every loop iteration (that would click/distort).
+static void applyRiffStep(int idx) {
+    const RiffStep& step = riff[idx];
+    if (step.freq == REST) {
+        noTone(BUZZER_PIN);
+    } else {
+        tone(BUZZER_PIN, step.freq);
+    }
+}
+
 // ── End-of-mission celebration (LED + buzzer) ───────────────────────────────
 void updateCelebration() {
     // Arm-and-fire: rover must have moved this cycle (armed=true), and
@@ -171,37 +182,30 @@ void updateCelebration() {
         armed = false;                 // disarm until next motion
         celebStepIdx = 0;
         celebStepStartMs = millis();
+        digitalWrite(LED_PIN, HIGH);   // solid on for the whole riff
+        applyRiffStep(0);              // start the first note immediately
         Monitor.println("[celebration] mission complete — playing riff");
+        return;
     }
 
     if (!celebrating) return;
 
-    // LED stays solid on for the whole celebration window — it's a visual
-    // "mission complete" signal, not a beat indicator.
-    digitalWrite(LED_PIN, HIGH);
+    // Has the current step's duration elapsed?
+    if (millis() - celebStepStartMs < (unsigned long)riff[celebStepIdx].duration_ms) {
+        return;  // still inside the current step, nothing to do
+    }
 
-    // Riff finished
+    // Advance to next step
+    celebStepIdx++;
+    celebStepStartMs = millis();
+
     if (celebStepIdx >= RIFF_STEPS) {
+        // Riff finished
         celebrating = false;
         digitalWrite(LED_PIN, LOW);
         noTone(BUZZER_PIN);
         return;
     }
 
-    const RiffStep& step = riff[celebStepIdx];
-
-    // Step duration elapsed — advance
-    if (millis() - celebStepStartMs >= (unsigned long)step.duration_ms) {
-        celebStepIdx++;
-        celebStepStartMs = millis();
-        return;
-    }
-
-    // The buzzer plays the note (or stays silent on a REST). The LED is
-    // handled above and remains on throughout.
-    if (step.freq == REST) {
-        noTone(BUZZER_PIN);
-    } else {
-        tone(BUZZER_PIN, step.freq);
-    }
+    applyRiffStep(celebStepIdx);
 }
