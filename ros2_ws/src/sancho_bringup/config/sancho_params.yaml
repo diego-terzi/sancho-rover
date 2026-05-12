@@ -4,9 +4,9 @@ camera_node:
     frame_width: 640
     frame_height: 480
     publish_rate_hz: 30.0
-    hsv_lower: [0, 7, 69]       # on-rover calibration via tools/calibrate_hsv_web.py
-    hsv_upper: [30, 255, 255]
-    roi_height_percent: 0.57
+    hsv_lower: [16, 0, 58]      # on-rover calibration via tools/calibrate_hsv_web.py
+    hsv_upper: [33, 255, 255]
+    roi_height_percent: 0.40
     num_roi_strips: 3           # horizontal slices for multi-point line fit
     min_contour_area: 500       # px; blobs smaller than this are ignored
     morph_kernel_size: 5        # erosion/dilation kernel; increase on noisy images
