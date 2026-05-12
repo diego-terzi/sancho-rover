@@ -4,9 +4,9 @@ camera_node:
     frame_width: 640
     frame_height: 480
     publish_rate_hz: 30.0
-    hsv_lower: [5, 46, 145]     # orange trail, on-rover calibration via tools/calibrate_hsv_web.py
-    hsv_upper: [25, 255, 255]
-    roi_height_percent: 0.50
+    hsv_lower: [20, 41, 98]     # on-rover calibration via tools/calibrate_hsv_web.py
+    hsv_upper: [95, 242, 255]
+    roi_height_percent: 0.52
     num_roi_strips: 3           # horizontal slices for multi-point line fit
     min_contour_area: 500       # px; blobs smaller than this are ignored
     morph_kernel_size: 5        # erosion/dilation kernel; increase on noisy images
@@ -33,7 +33,7 @@ motor_bridge_node:
     # 4WD skid-steer: 2 motors per side (JGB37-545 rear, JGB37-520 front).
     # Per-motor PWM scaling to match output speeds is handled in MCU firmware,
     # not here — ROS sees a logical "left side" and "right side" only.
-    wheel_separation: 0.45     # m, *effective* separation for 4WD skid-steer (physical is 0.265; inflated to overcome ground friction on inner wheels)
+    wheel_separation: 0.55     # m, *effective* separation for 4WD skid-steer (physical is 0.265; inflated further to amplify steering on the test terrain)
     wheel_diameter:   0.09     # m, driven wheel diameter (4WD chassis)
     motor_rpm:        300.0    # nominal output RPM of the slowest motor (545); v_max ≈ 1.41 m/s
     max_pwm:          255      # BTS7960 is 8-bit PWM
