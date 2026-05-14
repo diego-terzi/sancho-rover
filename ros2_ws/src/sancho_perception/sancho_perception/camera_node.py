@@ -8,8 +8,15 @@ class CameraNode(Node):
 
     def __init__(self):
         super().__init__('camera_node')
-        self.hsv_lower           = np.array(self.declare_parameter('hsv_lower', [0, 0, 0]).value)
-        self.hsv_upper           = np.array(self.declare_parameter('hsv_upper', [68, 255, 255]).value)
+        lab_a_min  = self.declare_parameter('lab_a_min',  100).value
+        lab_a_max  = self.declare_parameter('lab_a_max',  145).value
+        lab_b_min  = self.declare_parameter('lab_b_min',  150).value
+        lab_b_max  = self.declare_parameter('lab_b_max',  255).value
+        clahe_clip = self.declare_parameter('clahe_clip',  2.0).value
+        clahe_tile = self.declare_parameter('clahe_tile',    8).value
+        self.clahe      = cv2.createCLAHE(clipLimit=clahe_clip, tileGridSize=(clahe_tile, clahe_tile))
+        self.lab_lower  = np.array([0,   lab_a_min, lab_b_min])
+        self.lab_upper  = np.array([255, lab_a_max, lab_b_max])
         self.roi_height_percent  = self.declare_parameter('roi_height_percent', 0.40).value
         
         self.publish_rate_hz     = 30.0
@@ -44,8 +51,11 @@ class CameraNode(Node):
         height, width = frame.shape[:2]
         roi = frame[int(height * (1.0 - self.roi_height_percent)):, :]
         roi_h = roi.shape[0]
-        hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
-        mask = cv2.inRange(hsv, self.hsv_lower, self.hsv_upper)
+        lab = cv2.cvtColor(roi, cv2.COLOR_BGR2LAB)
+        l_ch, a_ch, b_ch = cv2.split(lab)
+        l_eq = self.clahe.apply(l_ch)
+        lab_eq = cv2.merge([l_eq, a_ch, b_ch])
+        mask = cv2.inRange(lab_eq, self.lab_lower, self.lab_upper)
         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, self.morph_kernel)
         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, self.morph_kernel)
 

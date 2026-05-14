@@ -4,8 +4,12 @@ camera_node:
     frame_width: 640
     frame_height: 480
     publish_rate_hz: 30.0
-    hsv_lower: [16, 0, 58]      # on-rover calibration via tools/calibrate_hsv_web.py
-    hsv_upper: [33, 255, 255]
+    lab_a_min: 100              # A channel lower bound (green-red axis, 0-255; 128=neutral)
+    lab_a_max: 145              # A channel upper bound
+    lab_b_min: 150              # B channel lower bound (blue-yellow axis; high value = yellow)
+    lab_b_max: 255              # B channel upper bound (leave at 255 to pass all yellow; lower to cut specular highlights)
+    clahe_clip: 2.0             # CLAHE clipLimit — aggressiveness of local contrast normalisation
+    clahe_tile: 8               # CLAHE tileGridSize (n×n grid)
     roi_height_percent: 0.60
     num_roi_strips: 3           # horizontal slices for multi-point line fit
     min_contour_area: 500       # px; blobs smaller than this are ignored
