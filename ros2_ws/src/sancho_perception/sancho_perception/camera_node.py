@@ -24,7 +24,6 @@ class CameraNode(Node):
         self.morph_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
 
         self.error_pub = self.create_publisher(Float32, 'trail_error', 1)
-        self.heading_pub = self.create_publisher(Float32, 'trail_heading', 1)
 
         self.cap = cv2.VideoCapture(0)
         if not self.cap.isOpened():
@@ -70,13 +69,11 @@ class CameraNode(Node):
             strip_points.append((cx, y0 + cy))
 
         half_w = width / 2.0
-        heading_raw = float('nan')
         if len(strip_points) >= 2:
             pts = np.array(strip_points)
             a, b = np.polyfit(pts[:, 1], pts[:, 0], 1)
             x_bottom = a * roi_h + b
             error_raw = float(np.clip((x_bottom - half_w) / half_w, -1.0, 1.0))
-            heading_raw = float(np.arctan(a))
         elif len(strip_points) == 1:
             error_raw = float(np.clip((strip_points[0][0] - half_w) / half_w, -1.0, 1.0))
         else:
@@ -96,14 +93,9 @@ class CameraNode(Node):
         msg.data = error
         self.error_pub.publish(msg)
 
-        heading_msg = Float32()
-        heading_msg.data = heading_raw
-        self.heading_pub.publish(heading_msg)
-
     def destroy_node(self):
         self.cap.release()
         super().destroy_node()
-
 
 def main(args=None):
     rclpy.init(args=args)

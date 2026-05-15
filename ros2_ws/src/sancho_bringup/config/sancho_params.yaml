@@ -16,13 +16,13 @@ camera_node:
 
 controller_node:
   ros__parameters:
+    motor_rpm: 300.0           # used to compute v_max (must match motor_bridge_node)
+    wheel_diameter: 0.09       # used to compute v_max (must match motor_bridge_node)
     pid_kp: 1.2                # PID on lateral trail error
     pid_ki: 0.0
     pid_kd: 0.1                # mild damping at higher speeds
-    min_speed: 0.5             # m/s; floor on tight curves
-    max_speed: 0.9             # m/s on straights (physical max ≈ 1.05 m/s)
-    heading_ff_gain: 0.2       # feed-forward: tiny anticipation, near no-effect
-    curve_slowdown_gain: 1.2   # |err| or |heading| at which speed → min_speed
+    slowdown_threshold: 0.7    # |err| above which speed is reduced
+    slow_speed_ratio: 0.5      # fraction of max_speed used when above threshold
     trail_lost_timeout: 2.0    # seconds of NaN/silence before TRAIL_LOST
     obstacle_distance_m: 0.3   # meters; below this => OBSTACLE_STOP (needs sensor_node)
     control_rate_hz: 20.0      # Twist publish rate; also the PID dt
@@ -37,7 +37,7 @@ motor_bridge_node:
     wheel_diameter:   0.09     # m, driven wheel diameter (4WD chassis)
     motor_rpm:        300.0    # nominal output RPM of the slowest motor (545); v_max ≈ 1.41 m/s
     max_pwm:          255      # BTS7960 is 8-bit PWM
-    deadband_pwm:     0        # TODO: tune on bench (expect 40-80 for a 24 kg loaded chassis)
+    deadband_pwm:     0        # TODO: tune on bench (5 kg chassis)
     invert_left:      false    # TODO: flip if left side runs backward on first test
     invert_right:     false    # TODO: flip if right side runs backward on first test
     left_scale:       1.0      # TODO: calibrate if left/right are asymmetric
