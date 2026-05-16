@@ -12,7 +12,11 @@ camera_node:
     clahe_tile: 8               # CLAHE tileGridSize (n×n grid)
     roi_height_percent: 0.60
     num_roi_strips: 3           # horizontal slices for multi-point line fit
-    min_contour_area: 500       # px; blobs smaller than this are ignored
+    min_contour_area: 500       # px; per-strip minimum; below this a blob is ignored
+    min_solidity: 0.60          # area/convex_hull_area; tape ~0.8+, grass clumps <0.5
+    min_tape_width_px: 15       # bounding-rect width per strip; eliminates narrow/pointy blobs
+    min_total_mask_area: 3000   # px in the whole ROI mask; below this the scene is treated as empty
+    max_fit_residual_px: 30.0   # mean |x_pred-x_actual| across strips; above this the line fit is rejected
     morph_kernel_size: 5        # erosion/dilation kernel; increase on noisy images
     ema_alpha: 0.3              # EMA weight on new sample (0=frozen, 1=no smoothing)
     lost_trail_patience: 5      # frames to coast before publishing NaN
