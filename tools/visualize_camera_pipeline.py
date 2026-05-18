@@ -48,19 +48,10 @@ def load_params(path):
     return data["camera_node"]["ros__parameters"]
 
 
-def save_params(path, lab_a_min, lab_a_max, lab_b_min, lab_b_max, clahe_clip, clahe_tile):
-    """Update only the LAB+CLAHE lines in the YAML, preserving all comments."""
+def save_params(path, updates):
+    """Update YAML lines in place, preserving comments. `updates`: list of (key, value_str)."""
     with open(path, "r") as f:
         text = f.read()
-
-    updates = [
-        ("lab_a_min",  str(lab_a_min)),
-        ("lab_a_max",  str(lab_a_max)),
-        ("lab_b_min",  str(lab_b_min)),
-        ("lab_b_max",  str(lab_b_max)),
-        ("clahe_clip", f"{clahe_clip:.1f}"),
-        ("clahe_tile", str(clahe_tile)),
-    ]
     for key, val in updates:
         # Replace only the numeric value; preserve any trailing inline comment.
         text = re.sub(
@@ -69,15 +60,25 @@ def save_params(path, lab_a_min, lab_a_max, lab_b_min, lab_b_max, clahe_clip, cl
             text,
             flags=re.MULTILINE,
         )
-
     with open(path, "w") as f:
         f.write(text)
-    print(f"[viz] saved → lab_a=[{lab_a_min},{lab_a_max}]  "
-          f"lab_b=[{lab_b_min},{lab_b_max}]  clahe_clip={clahe_clip:.1f}  clahe_tile={clahe_tile}")
+    print(f"[viz] saved {len(updates)} params to {os.path.basename(path)}")
 
 
 def nothing(_):
     pass
+
+
+def is_tape_like(cnt, min_area, min_solidity, min_width_px):
+    """Mirror of CameraNode._is_tape_like: area + solidity + bounding-rect-width gate."""
+    area = cv2.contourArea(cnt)
+    if area < min_area:
+        return False
+    hull_area = cv2.contourArea(cv2.convexHull(cnt))
+    if hull_area == 0 or area / hull_area < min_solidity:
+        return False
+    _, _, w, _ = cv2.boundingRect(cnt)
+    return w >= min_width_px
 
 
 def main():
@@ -91,6 +92,10 @@ def main():
     roi_pct          = float(p["roi_height_percent"])
     num_strips       = int(p.get("num_roi_strips", 3))
     min_contour_area = int(p.get("min_contour_area", 500))
+    min_solidity     = float(p.get("min_solidity", 0.60))
+    min_tape_width   = int(p.get("min_tape_width_px", 15))
+    min_total_mask   = int(p.get("min_total_mask_area", 3000))
+    max_fit_residual = float(p.get("max_fit_residual_px", 30.0))
     morph_k          = int(p.get("morph_kernel_size", 5))
     ema_alpha        = float(p.get("ema_alpha", 0.3))
     lost_patience    = int(p.get("lost_trail_patience", 5))
@@ -99,6 +104,8 @@ def main():
     print(f"      lab_a=[{lab_a_min},{lab_a_max}]  lab_b=[{lab_b_min},{lab_b_max}]")
     print(f"      clahe_clip={clahe_clip}  clahe_tile={clahe_tile}")
     print(f"      roi={roi_pct}  strips={num_strips}  min_area={min_contour_area}")
+    print(f"      min_solidity={min_solidity}  min_tape_width={min_tape_width}px")
+    print(f"      min_total_mask={min_total_mask}  max_residual={max_fit_residual}px")
     print(f"      morph_kernel={morph_k}  ema_alpha={ema_alpha}  patience={lost_patience}")
     print(f"[viz] press 's' to save, 'q'/Esc to quit")
 
@@ -112,13 +119,18 @@ def main():
     morph_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (morph_k, morph_k))
 
     cv2.namedWindow(CTRL_WIN, cv2.WINDOW_NORMAL)
-    cv2.resizeWindow(CTRL_WIN, 420, 200)
-    cv2.createTrackbar("A min",          CTRL_WIN, lab_a_min,              255, nothing)
-    cv2.createTrackbar("A max",          CTRL_WIN, lab_a_max,              255, nothing)
-    cv2.createTrackbar("B min",          CTRL_WIN, lab_b_min,              255, nothing)
-    cv2.createTrackbar("B max",          CTRL_WIN, lab_b_max,              255, nothing)
-    cv2.createTrackbar("CLAHE clip x10", CTRL_WIN, int(clahe_clip * 10),    80, nothing)
-    cv2.createTrackbar("CLAHE tile",     CTRL_WIN, clahe_tile,              32, nothing)
+    cv2.resizeWindow(CTRL_WIN, 460, 420)
+    cv2.createTrackbar("A min",          CTRL_WIN, lab_a_min,                  255, nothing)
+    cv2.createTrackbar("A max",          CTRL_WIN, lab_a_max,                  255, nothing)
+    cv2.createTrackbar("B min",          CTRL_WIN, lab_b_min,                  255, nothing)
+    cv2.createTrackbar("B max",          CTRL_WIN, lab_b_max,                  255, nothing)
+    cv2.createTrackbar("CLAHE clip x10", CTRL_WIN, int(clahe_clip * 10),        80, nothing)
+    cv2.createTrackbar("CLAHE tile",     CTRL_WIN, clahe_tile,                  32, nothing)
+    cv2.createTrackbar("min_area",       CTRL_WIN, min_contour_area,          5000, nothing)
+    cv2.createTrackbar("solidity x100",  CTRL_WIN, int(min_solidity * 100),    100, nothing)
+    cv2.createTrackbar("min_width_px",   CTRL_WIN, min_tape_width,             200, nothing)
+    cv2.createTrackbar("min_total_mask", CTRL_WIN, min_total_mask,           30000, nothing)
+    cv2.createTrackbar("residual_px",    CTRL_WIN, int(max_fit_residual),      100, nothing)
 
     clahe      = cv2.createCLAHE(clipLimit=clahe_clip, tileGridSize=(clahe_tile, clahe_tile))
     prev_clip  = clahe_clip
@@ -140,6 +152,11 @@ def main():
         clip_int = cv2.getTrackbarPos("CLAHE clip x10", CTRL_WIN)
         tile     = max(1, cv2.getTrackbarPos("CLAHE tile", CTRL_WIN))
         clip     = clip_int / 10.0
+        min_area_t       = cv2.getTrackbarPos("min_area",       CTRL_WIN)
+        solidity_t       = cv2.getTrackbarPos("solidity x100",  CTRL_WIN) / 100.0
+        min_width_t      = cv2.getTrackbarPos("min_width_px",   CTRL_WIN)
+        min_total_mask_t = cv2.getTrackbarPos("min_total_mask", CTRL_WIN)
+        max_residual_t   = float(cv2.getTrackbarPos("residual_px", CTRL_WIN))
 
         # Recreate CLAHE only when its params actually change
         if clip != prev_clip or tile != prev_tile:
@@ -164,39 +181,56 @@ def main():
         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN,  morph_kernel)
         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, morph_kernel)
 
-        # Per-strip blob detection (same as camera_node)
+        # Total-mask gate first: skip the strip loop entirely if mask is too thin.
+        mask_area   = int(cv2.countNonZero(mask))
+        gate_passed = mask_area >= min_total_mask_t
+
         strip_h      = roi_h // num_strips
         strip_points = []
-        for i in range(num_strips):
-            y0 = roi_h - (i + 1) * strip_h
-            y1 = roi_h - i * strip_h
-            contours, _ = cv2.findContours(
-                mask[y0:y1, :], cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
-            )
-            if not contours:
-                continue
-            largest = max(contours, key=cv2.contourArea)
-            if cv2.contourArea(largest) < min_contour_area:
-                continue
-            M = cv2.moments(largest)
-            if M["m00"] == 0:
-                continue
-            cx = M["m10"] / M["m00"]
-            cy = M["m01"] / M["m00"]
-            strip_points.append((cx, y0 + cy))
+        if gate_passed:
+            for i in range(num_strips):
+                y0 = roi_h - (i + 1) * strip_h
+                y1 = roi_h - i * strip_h
+                contours, _ = cv2.findContours(
+                    mask[y0:y1, :], cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+                )
+                tape_like = []
+                rejected  = []
+                for c in contours:
+                    (tape_like if is_tape_like(c, min_area_t, solidity_t, min_width_t) else rejected).append(c)
+                # Draw rejected contours in red so the user can see what's being filtered.
+                for c in rejected:
+                    cv2.drawContours(roi[y0:y1], [c], -1, (0, 0, 255), 1)
+                if not tape_like:
+                    continue
+                largest = max(tape_like, key=cv2.contourArea)
+                M = cv2.moments(largest)
+                if M["m00"] == 0:
+                    continue
+                cx = M["m10"] / M["m00"]
+                cy = M["m01"] / M["m00"]
+                strip_points.append((cx, y0 + cy))
+                cv2.drawContours(roi[y0:y1], [largest], -1, (0, 255, 0), 2)
+                cv2.circle(roi[y0:y1], (int(cx), int(cy)), 8, (0, 0, 255), -1)
 
-            cv2.drawContours(roi[y0:y1], [largest], -1, (0, 255, 0), 2)
-            cv2.circle(roi[y0:y1], (int(cx), int(cy)), 8, (0, 0, 255), -1)
-
-        # Line fit + error
+        # Line fit + residual check (mirrors camera_node logic).
+        if not gate_passed:
+            fit_status = f"mask_too_small ({mask_area}<{min_total_mask_t})"
+        else:
+            fit_status = f"need>=2 strips (got {len(strip_points)})"
         if len(strip_points) >= 2:
             pts = np.array(strip_points)
             coef_a, coef_b = np.polyfit(pts[:, 1], pts[:, 0], 1)
-            x_bottom  = coef_a * roi_h + coef_b
-            error_raw = float(np.clip((x_bottom - half_w) / half_w, -1.0, 1.0))
-            cv2.line(roi, (int(coef_b), 0), (int(x_bottom), roi_h), (0, 255, 255), 2)
-        elif len(strip_points) == 1:
-            error_raw = float(np.clip((strip_points[0][0] - half_w) / half_w, -1.0, 1.0))
+            residual = float(np.mean(np.abs(coef_a * pts[:, 1] + coef_b - pts[:, 0])))
+            x_bottom = coef_a * roi_h + coef_b
+            if residual <= max_residual_t:
+                error_raw = float(np.clip((x_bottom - half_w) / half_w, -1.0, 1.0))
+                cv2.line(roi, (int(coef_b), 0), (int(x_bottom), roi_h), (0, 255, 255), 2)
+                fit_status = f"fit_ok r={residual:.1f}"
+            else:
+                error_raw = None
+                cv2.line(roi, (int(coef_b), 0), (int(x_bottom), roi_h), (255, 0, 255), 1)
+                fit_status = f"fit_rejected r={residual:.1f}>{max_residual_t:.0f}"
         else:
             error_raw = None
 
@@ -221,17 +255,14 @@ def main():
         frame[roi_y0:, :] = roi
 
         err_str = "nan" if (error != error) else f"{error:+.3f}"
-        cv2.putText(
-            frame,
-            f"err={err_str}  strips={len(strip_points)}/{num_strips}  lost={consecutive_lost}",
-            (8, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 3,
-        )
-        cv2.putText(
-            frame,
-            f"err={err_str}  strips={len(strip_points)}/{num_strips}  lost={consecutive_lost}",
-            (8, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 1,
-        )
-        param_str = f"A=[{a_min},{a_max}]  B=[{b_min},{b_max}]  CLAHE={clip:.1f}/{tile}"
+        line1 = f"err={err_str}  strips={len(strip_points)}/{num_strips}  lost={consecutive_lost}"
+        line2 = f"mask={mask_area}  {fit_status}"
+        for y, txt in ((22, line1), (44, line2)):
+            cv2.putText(frame, txt, (8, y), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 3)
+            cv2.putText(frame, txt, (8, y), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 1)
+
+        param_str = (f"A=[{a_min},{a_max}]  B=[{b_min},{b_max}]  CLAHE={clip:.1f}/{tile}  "
+                     f"sol={solidity_t:.2f}  minW={min_width_t}  res={max_residual_t:.0f}")
         cv2.putText(frame, param_str, (8, h - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 0), 3)
         cv2.putText(frame, param_str, (8, h - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 0), 1)
 
@@ -242,7 +273,19 @@ def main():
         if key in (27, ord("q")):
             break
         if key == ord("s"):
-            save_params(YAML_PATH, a_min, a_max, b_min, b_max, clip, tile)
+            save_params(YAML_PATH, [
+                ("lab_a_min",           str(a_min)),
+                ("lab_a_max",           str(a_max)),
+                ("lab_b_min",           str(b_min)),
+                ("lab_b_max",           str(b_max)),
+                ("clahe_clip",          f"{clip:.1f}"),
+                ("clahe_tile",          str(tile)),
+                ("min_contour_area",    str(min_area_t)),
+                ("min_solidity",        f"{solidity_t:.2f}"),
+                ("min_tape_width_px",   str(min_width_t)),
+                ("min_total_mask_area", str(min_total_mask_t)),
+                ("max_fit_residual_px", f"{max_residual_t:.1f}"),
+            ])
 
     cap.release()
     cv2.destroyAllWindows()
