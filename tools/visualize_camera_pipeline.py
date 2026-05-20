@@ -38,8 +38,60 @@ YAML_PATH = os.path.join(
 CAM_INDEX = int(sys.argv[1]) if len(sys.argv) > 1 else 0
 
 CTRL_WIN = "controls  [s]=save  [q]=quit"
-VIZ_WIN  = "camera_node pipeline (full frame + ROI overlay)"
+VIZ_WIN  = "camera_node pipeline  [drag]=sample colour  [s]=save  [q]=quit"
 MASK_WIN = "mask"
+
+# Margins added around the percentile-sampled LAB range.
+MARGIN_A = 10
+MARGIN_B = 15
+
+_sel = {'drawing': False, 'ix': 0, 'iy': 0, 'ex': 0, 'ey': 0, 'frame': None}
+
+
+def _sample_lab(frame, x0, y0, x1, y1):
+    """Return (a_lo, a_hi, b_lo, b_hi) sampled from the rectangle with margins."""
+    patch = frame[y0:y1, x0:x1]
+    if patch.size == 0:
+        return None
+    lab   = cv2.cvtColor(patch, cv2.COLOR_BGR2LAB)
+    a_ch  = lab[:, :, 1].flatten()
+    b_ch  = lab[:, :, 2].flatten()
+    a_lo  = max(0,   int(np.percentile(a_ch,  5)) - MARGIN_A)
+    a_hi  = min(255, int(np.percentile(a_ch, 95)) + MARGIN_A)
+    b_lo  = max(0,   int(np.percentile(b_ch,  5)) - MARGIN_B)
+    b_hi  = min(255, int(np.percentile(b_ch, 95)) + MARGIN_B)
+    return a_lo, a_hi, b_lo, b_hi
+
+
+def _mouse_cb(event, x, y, flags, param):
+    ctrl_win = param
+    s = _sel
+    if event == cv2.EVENT_LBUTTONDOWN:
+        s['drawing'] = True
+        s['ix'] = s['ex'] = x
+        s['iy'] = s['ey'] = y
+    elif event == cv2.EVENT_MOUSEMOVE and s['drawing']:
+        s['ex'] = x
+        s['ey'] = y
+    elif event == cv2.EVENT_LBUTTONUP:
+        s['drawing'] = False
+        s['ex'] = x
+        s['ey'] = y
+        if s['frame'] is None:
+            return
+        x0, x1 = sorted([s['ix'], s['ex']])
+        y0, y1 = sorted([s['iy'], s['ey']])
+        if (x1 - x0) < 5 or (y1 - y0) < 5:
+            return
+        result = _sample_lab(s['frame'], x0, y0, x1, y1)
+        if result is None:
+            return
+        a_lo, a_hi, b_lo, b_hi = result
+        cv2.setTrackbarPos("A min", ctrl_win, a_lo)
+        cv2.setTrackbarPos("A max", ctrl_win, a_hi)
+        cv2.setTrackbarPos("B min", ctrl_win, b_lo)
+        cv2.setTrackbarPos("B max", ctrl_win, b_hi)
+        print(f"[viz] sampled LAB → A=[{a_lo},{a_hi}]  B=[{b_lo},{b_hi}]")
 
 
 def load_params(path):
@@ -119,7 +171,8 @@ def main():
     morph_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (morph_k, morph_k))
 
     cv2.namedWindow(CTRL_WIN, cv2.WINDOW_NORMAL)
-    cv2.resizeWindow(CTRL_WIN, 460, 420)
+    cv2.resizeWindow(CTRL_WIN, 460, 470)
+    cv2.createTrackbar("ROI % x100",     CTRL_WIN, int(roi_pct * 100),         100, nothing)
     cv2.createTrackbar("A min",          CTRL_WIN, lab_a_min,                  255, nothing)
     cv2.createTrackbar("A max",          CTRL_WIN, lab_a_max,                  255, nothing)
     cv2.createTrackbar("B min",          CTRL_WIN, lab_b_min,                  255, nothing)
@@ -136,13 +189,16 @@ def main():
     prev_clip  = clahe_clip
     prev_tile  = clahe_tile
 
-    smoothed_error   = 0.0
-    consecutive_lost = 0
+    smoothed_error    = 0.0
+    consecutive_lost  = 0
+    cb_registered     = False
 
     while True:
         ok, frame = cap.read()
         if not ok:
             continue
+
+        _sel['frame'] = frame.copy()  # clean copy for colour sampling
 
         # Read live trackbar values
         a_min    = cv2.getTrackbarPos("A min",          CTRL_WIN)
@@ -152,6 +208,7 @@ def main():
         clip_int = cv2.getTrackbarPos("CLAHE clip x10", CTRL_WIN)
         tile     = max(1, cv2.getTrackbarPos("CLAHE tile", CTRL_WIN))
         clip     = clip_int / 10.0
+        roi_pct_t        = max(0.05, cv2.getTrackbarPos("ROI % x100",    CTRL_WIN) / 100.0)
         min_area_t       = cv2.getTrackbarPos("min_area",       CTRL_WIN)
         solidity_t       = cv2.getTrackbarPos("solidity x100",  CTRL_WIN) / 100.0
         min_width_t      = cv2.getTrackbarPos("min_width_px",   CTRL_WIN)
@@ -165,7 +222,7 @@ def main():
             prev_tile = tile
 
         h, w = frame.shape[:2]
-        roi_y0 = int(h * (1.0 - roi_pct))
+        roi_y0 = int(h * (1.0 - roi_pct_t))
         roi    = frame[roi_y0:, :].copy()
         roi_h  = roi.shape[0]
         half_w = w / 2.0
@@ -181,7 +238,6 @@ def main():
         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN,  morph_kernel)
         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, morph_kernel)
 
-        # Total-mask gate first: skip the strip loop entirely if mask is too thin.
         mask_area   = int(cv2.countNonZero(mask))
         gate_passed = mask_area >= min_total_mask_t
 
@@ -198,7 +254,6 @@ def main():
                 rejected  = []
                 for c in contours:
                     (tape_like if is_tape_like(c, min_area_t, solidity_t, min_width_t) else rejected).append(c)
-                # Draw rejected contours in red so the user can see what's being filtered.
                 for c in rejected:
                     cv2.drawContours(roi[y0:y1], [c], -1, (0, 0, 255), 1)
                 if not tape_like:
@@ -213,7 +268,6 @@ def main():
                 cv2.drawContours(roi[y0:y1], [largest], -1, (0, 255, 0), 2)
                 cv2.circle(roi[y0:y1], (int(cx), int(cy)), 8, (0, 0, 255), -1)
 
-        # Line fit + residual check (mirrors camera_node logic).
         if not gate_passed:
             fit_status = f"mask_too_small ({mask_area}<{min_total_mask_t})"
         else:
@@ -261,19 +315,29 @@ def main():
             cv2.putText(frame, txt, (8, y), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 3)
             cv2.putText(frame, txt, (8, y), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 1)
 
-        param_str = (f"A=[{a_min},{a_max}]  B=[{b_min},{b_max}]  CLAHE={clip:.1f}/{tile}  "
-                     f"sol={solidity_t:.2f}  minW={min_width_t}  res={max_residual_t:.0f}")
+        param_str = f"A=[{a_min},{a_max}]  B=[{b_min},{b_max}]  CLAHE={clip:.1f}/{tile}"
         cv2.putText(frame, param_str, (8, h - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 0), 3)
         cv2.putText(frame, param_str, (8, h - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 0), 1)
 
+        # Draw selection rectangle while dragging
+        if _sel['drawing']:
+            cv2.rectangle(frame, (_sel['ix'], _sel['iy']), (_sel['ex'], _sel['ey']),
+                          (0, 255, 255), 2)
+
         cv2.imshow(VIZ_WIN, frame)
         cv2.imshow(MASK_WIN, mask)
+
+        if not cb_registered:
+            cv2.waitKey(1)
+            cv2.setMouseCallback(VIZ_WIN, _mouse_cb, CTRL_WIN)
+            cb_registered = True
 
         key = cv2.waitKey(1) & 0xFF
         if key in (27, ord("q")):
             break
         if key == ord("s"):
             save_params(YAML_PATH, [
+                ("roi_height_percent",  f"{roi_pct_t:.2f}"),
                 ("lab_a_min",           str(a_min)),
                 ("lab_a_max",           str(a_max)),
                 ("lab_b_min",           str(b_min)),
