@@ -17,6 +17,7 @@ camera_node:
     min_tape_width_px: 15       # bounding-rect width per strip; eliminates narrow/pointy blobs
     min_total_mask_area: 3000   # px in the whole ROI mask; below this the scene is treated as empty
     max_fit_residual_px: 30.0   # mean |x_pred-x_actual| across strips; above this the line fit is rejected
+    lookahead_row_fraction: 0.0 # row to project for /trail_lookahead_error: 0=top of ROI (max anticipation, auto-clamped to topmost centroid); 1=bottom (no anticipation)
     morph_kernel_size: 5        # erosion/dilation kernel; increase on noisy images
     ema_alpha: 0.3              # EMA weight on new sample (0=frozen, 1=no smoothing)
     lost_trail_patience: 5      # frames to coast before publishing NaN
@@ -29,8 +30,7 @@ controller_node:
     pid_kp: 1.2                # PID on lateral trail error
     pid_ki: 0.0
     pid_kd: 0.1                # mild damping at higher speeds
-    slowdown_threshold: 0.7    # |err| above which speed is reduced
-    slow_speed_ratio: 0.5      # fraction of max_speed used when above threshold
+    slow_speed_ratio: 0.5      # minimum fraction of max_speed when lookahead_err = ±1 (tight curve ahead); linear ramp from 1.0 at lookahead_err = 0
     trail_lost_timeout: 2.0    # seconds of NaN/silence before TRAIL_LOST
     obstacle_distance_m: 0.3   # meters; below this => OBSTACLE_STOP (needs sensor_node)
     control_rate_hz: 20.0      # Twist publish rate; also the PID dt

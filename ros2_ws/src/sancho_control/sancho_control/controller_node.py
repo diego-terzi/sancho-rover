@@ -8,7 +8,10 @@ State machine:
 
 Control law on FOLLOWING:
     angular.z = -(Kp*err + Ki*∫err + Kd*ḋerr)
-    linear.x  = slow_speed if |err| > slowdown_threshold else max_speed
+    linear.x  = max_speed * (1 - (1 - slow_speed_ratio) * |lookahead_err|)
+              # lookahead_err = trail position at a row higher in the ROI,
+              # i.e. "where the trail is going", from /trail_lookahead_error.
+              # 0 → full speed, ±1 → slow_speed_ratio * max_speed.
 """
 
 import math
@@ -35,20 +38,21 @@ class ControllerNode(Node):
         self.kp                  = float(self.declare_parameter('pid_kp', 1.5).value)
         self.ki                  = float(self.declare_parameter('pid_ki', 0.0).value)
         self.kd                  = float(self.declare_parameter('pid_kd', 0.1).value)
-        self.slowdown_threshold  = float(self.declare_parameter('slowdown_threshold', 0.7).value)
         self.slow_speed_ratio    = float(self.declare_parameter('slow_speed_ratio', 0.5).value)
         self.trail_lost_timeout  = float(self.declare_parameter('trail_lost_timeout', 2.0).value)
         self.obstacle_distance_m = float(self.declare_parameter('obstacle_distance_m', 0.3).value)
         self.control_rate_hz     = float(self.declare_parameter('control_rate_hz', 20.0).value)
         self.max_angular_z       = float(self.declare_parameter('max_angular_z', 2.0).value)
 
-        self.create_subscription(Float32, 'trail_error', self._on_trail_error, 1)
-        self.create_subscription(Range, 'scan', self._on_scan, 1)
+        self.create_subscription(Float32, 'trail_error',           self._on_trail_error, 1)
+        self.create_subscription(Float32, 'trail_lookahead_error', self._on_lookahead,   1)
+        self.create_subscription(Range,   'scan',                  self._on_scan,        1)
         self.cmd_pub = self.create_publisher(Twist, 'cmd_vel', 1)
 
-        self.last_valid_error = 0.0
-        self.last_valid_time = None
-        self.last_distance = float('inf')
+        self.last_valid_error   = 0.0
+        self.last_valid_time    = None
+        self.last_lookahead_err = 0.0
+        self.last_distance      = float('inf')
         self.last_distance_time = None
         self.prev_error = 0.0
         self.integral = 0.0
@@ -58,18 +62,18 @@ class ControllerNode(Node):
 
         self.get_logger().info('Controller node started')
 
-    # --- Subscribers just stash; the timer does all the work ---
-
     def _on_trail_error(self, msg: Float32):
         if not math.isnan(msg.data):
             self.last_valid_error = float(msg.data)
             self.last_valid_time = self.get_clock().now()
 
+    def _on_lookahead(self, msg: Float32):
+        if not math.isnan(msg.data):
+            self.last_lookahead_err = float(msg.data)
+
     def _on_scan(self, msg: Range):
         self.last_distance = float(msg.range)
         self.last_distance_time = self.get_clock().now()
-
-    # --- Control loop ---
 
     def _control_step(self):
         now = self.get_clock().now()
@@ -96,8 +100,10 @@ class ControllerNode(Node):
                 # Fresh start on re-entry: prevents integral windup from a long
                 # stop, and avoids a derivative kick when the trail re-appears
                 # at a very different position than it was lost at.
-                self.integral = 0.0
-                self.prev_error = self.last_valid_error
+                self.integral           = 0.0
+                self.prev_error         = self.last_valid_error
+                # Drop any stale anticipation from before the trail was lost.
+                self.last_lookahead_err = 0.0
             self.current_state = next_state
 
         cmd = Twist()
@@ -119,12 +125,14 @@ class ControllerNode(Node):
             angular_z = -angular_correction
             angular_z = max(-self.max_angular_z, min(self.max_angular_z, angular_z))
 
-            if abs(error) > self.slowdown_threshold:
-                speed = self.max_speed * self.slow_speed_ratio
-            else:
-                speed = self.max_speed
+            # Speed reduced proportionally to how much the trail curves *ahead*
+            # of the rover. lookahead_err = 0 → full max_speed; lookahead_err = ±1
+            # → max_speed * slow_speed_ratio. Linear ramp in between. Steering is
+            # unaffected — only the longitudinal velocity is modulated.
+            curve_intensity = min(1.0, abs(self.last_lookahead_err))
+            speed = self.max_speed * (1.0 - (1.0 - self.slow_speed_ratio) * curve_intensity)
 
-            cmd.linear.x = speed
+            cmd.linear.x  = speed
             cmd.angular.z = angular_z
 
         self.cmd_pub.publish(cmd)
