@@ -4,20 +4,20 @@ camera_node:
     frame_width: 640
     frame_height: 480
     publish_rate_hz: 30.0
-    roi_height_percent: 1.0     # process the entire frame (no top crop)
-    # ── shape_mask: top-hat / black-hat matched filter for narrow vertical stripes ─────
-    # Detector is colour-blind: only the *width* and *elongation* of the tape matter.
-    tape_width_px: 15           # expected tape width in px (~1 cm physical, ~50-80 cm viewing distance)
-    stripe_threshold: 25        # min top-hat response to count as stripe pixel (0..255)
-    min_blob_area: 800          # px²; CC blobs smaller than this are discarded
-    min_elongation: 3.0         # bbox max/min ratio; tape is long and thin (≥ 3:1)
-    clahe_clip: 2.0             # CLAHE clipLimit — local contrast normalisation before top-hat
-    clahe_tile: 8               # CLAHE tile grid size (n×n)
-    # ── mask_to_error: strip centroids → line fit → lateral error in [-1, 1] ──────────
+    lab_a_min: 100              # A channel lower bound (green-red axis, 0-255; 128=neutral)
+    lab_a_max: 145              # A channel upper bound
+    lab_b_min: 150              # B channel lower bound (blue-yellow axis; high value = yellow)
+    lab_b_max: 255              # B channel upper bound (leave at 255 to pass all yellow; lower to cut specular highlights)
+    clahe_clip: 2.0             # CLAHE clipLimit — aggressiveness of local contrast normalisation
+    clahe_tile: 8               # CLAHE tileGridSize (n×n grid)
+    roi_height_percent: 0.60
     num_roi_strips: 3           # horizontal slices for multi-point line fit
-    min_strip_area: 500         # px²; per-strip minimum; below this a strip has no detection
-    max_fit_residual_px: 30.0   # mean |x_pred-x_actual| across strips; above this the fit is rejected
-    # ── Smoothing & debounce ──────────────────────────────────────────────────────────
+    min_contour_area: 500       # px; per-strip minimum; below this a blob is ignored
+    min_solidity: 0.60          # area/convex_hull_area; tape ~0.8+, grass clumps <0.5
+    min_tape_width_px: 15       # bounding-rect width per strip; eliminates narrow/pointy blobs
+    min_total_mask_area: 3000   # px in the whole ROI mask; below this the scene is treated as empty
+    max_fit_residual_px: 30.0   # mean |x_pred-x_actual| across strips; above this the line fit is rejected
+    morph_kernel_size: 5        # erosion/dilation kernel; increase on noisy images
     ema_alpha: 0.3              # EMA weight on new sample (0=frozen, 1=no smoothing)
     lost_trail_patience: 5      # frames to coast before publishing NaN
     show_debug: true
