@@ -2,19 +2,20 @@
 """
 Local debug viewer for the camera_node pipeline.
 
-Mirrors what sancho_perception/camera_node.py does, with live OpenCV
-visualisation: ROI box, LAB mask, per-strip detected blobs, line fit, and
-the resulting trail_error value. No ROS required — just OpenCV + NumPy.
+Mirrors what sancho_perception/camera_node.py does (lab_mask + mask_to_error),
+with live OpenCV visualisation: ROI box, LAB mask, per-strip detected blobs,
+line fit, trail_error, and trail_lookahead_error. No ROS required.
 
 Reads the same params from sancho_params.yaml as the node. Interactive
-trackbars let you tune the LAB+CLAHE thresholds live. Press 's' to write
+trackbars let you tune all detector params live. Press 's' to write
 the current trackbar values back to sancho_params.yaml.
 
 Usage:
     python3 tools/visualize_camera_pipeline.py [camera_index]   (default: 0)
 
-Press 's' to save parameters to sancho_params.yaml.
-Press 'q' or Esc to quit.
+Keys:
+    s        save current trackbar values to sancho_params.yaml
+    q / Esc  quit
 """
 
 import os
@@ -146,11 +147,12 @@ def main():
     min_contour_area = int(p.get("min_contour_area", 500))
     min_solidity     = float(p.get("min_solidity", 0.60))
     min_tape_width   = int(p.get("min_tape_width_px", 15))
-    min_total_mask   = int(p.get("min_total_mask_area", 3000))
-    max_fit_residual = float(p.get("max_fit_residual_px", 30.0))
-    morph_k          = int(p.get("morph_kernel_size", 5))
-    ema_alpha        = float(p.get("ema_alpha", 0.3))
-    lost_patience    = int(p.get("lost_trail_patience", 5))
+    min_total_mask       = int(p.get("min_total_mask_area", 3000))
+    max_fit_residual     = float(p.get("max_fit_residual_px", 30.0))
+    lookahead_row_frac   = float(p.get("lookahead_row_fraction", 0.0))
+    morph_k              = int(p.get("morph_kernel_size", 5))
+    ema_alpha            = float(p.get("ema_alpha", 0.3))
+    lost_patience        = int(p.get("lost_trail_patience", 5))
 
     print(f"[viz] params from YAML:")
     print(f"      lab_a=[{lab_a_min},{lab_a_max}]  lab_b=[{lab_b_min},{lab_b_max}]")
@@ -158,7 +160,8 @@ def main():
     print(f"      roi={roi_pct}  strips={num_strips}  min_area={min_contour_area}")
     print(f"      min_solidity={min_solidity}  min_tape_width={min_tape_width}px")
     print(f"      min_total_mask={min_total_mask}  max_residual={max_fit_residual}px")
-    print(f"      morph_kernel={morph_k}  ema_alpha={ema_alpha}  patience={lost_patience}")
+    print(f"      lookahead_row_frac={lookahead_row_frac}  morph_kernel={morph_k}")
+    print(f"      ema_alpha={ema_alpha}  patience={lost_patience}")
     print(f"[viz] press 's' to save, 'q'/Esc to quit")
 
     cap = cv2.VideoCapture(CAM_INDEX)
@@ -184,14 +187,16 @@ def main():
     cv2.createTrackbar("min_width_px",   CTRL_WIN, min_tape_width,             200, nothing)
     cv2.createTrackbar("min_total_mask", CTRL_WIN, min_total_mask,           30000, nothing)
     cv2.createTrackbar("residual_px",    CTRL_WIN, int(max_fit_residual),      100, nothing)
+    cv2.createTrackbar("lookahead x100", CTRL_WIN, int(lookahead_row_frac * 100), 100, nothing)
 
     clahe      = cv2.createCLAHE(clipLimit=clahe_clip, tileGridSize=(clahe_tile, clahe_tile))
     prev_clip  = clahe_clip
     prev_tile  = clahe_tile
 
-    smoothed_error    = 0.0
-    consecutive_lost  = 0
-    cb_registered     = False
+    smoothed_error        = 0.0
+    smoothed_lookahead    = 0.0
+    consecutive_lost      = 0
+    cb_registered         = False
 
     while True:
         ok, frame = cap.read()
@@ -214,6 +219,7 @@ def main():
         min_width_t      = cv2.getTrackbarPos("min_width_px",   CTRL_WIN)
         min_total_mask_t = cv2.getTrackbarPos("min_total_mask", CTRL_WIN)
         max_residual_t   = float(cv2.getTrackbarPos("residual_px", CTRL_WIN))
+        lookahead_frac_t = cv2.getTrackbarPos("lookahead x100", CTRL_WIN) / 100.0
 
         # Recreate CLAHE only when its params actually change
         if clip != prev_clip or tile != prev_tile:
@@ -272,6 +278,8 @@ def main():
             fit_status = f"mask_too_small ({mask_area}<{min_total_mask_t})"
         else:
             fit_status = f"need>=2 strips (got {len(strip_points)})"
+        error_raw        = None
+        lookahead_raw    = None
         if len(strip_points) >= 2:
             pts = np.array(strip_points)
             coef_a, coef_b = np.polyfit(pts[:, 1], pts[:, 0], 1)
@@ -281,24 +289,39 @@ def main():
                 error_raw = float(np.clip((x_bottom - half_w) / half_w, -1.0, 1.0))
                 cv2.line(roi, (int(coef_b), 0), (int(x_bottom), roi_h), (0, 255, 255), 2)
                 fit_status = f"fit_ok r={residual:.1f}"
+
+                # Lookahead: same logic as camera_node.mask_to_error
+                top_detected_y = float(pts[:, 1].min())
+                look_y = max(roi_h * lookahead_frac_t, top_detected_y)
+                x_look = coef_a * look_y + coef_b
+                lookahead_raw = float(np.clip((x_look - half_w) / half_w, -1.0, 1.0))
+                # Draw lookahead point
+                cv2.circle(roi, (int(x_look), int(look_y)), 8, (255, 165, 0), -1)
+                cv2.line(roi, (int(x_look) - 12, int(look_y)),
+                              (int(x_look) + 12, int(look_y)), (255, 165, 0), 2)
             else:
-                error_raw = None
                 cv2.line(roi, (int(coef_b), 0), (int(x_bottom), roi_h), (255, 0, 255), 1)
                 fit_status = f"fit_rejected r={residual:.1f}>{max_residual_t:.0f}"
-        else:
-            error_raw = None
 
-        # EMA + lost-trail debounce
+        # EMA + lost-trail debounce (mirrors camera_node)
         if error_raw is not None:
             if consecutive_lost > lost_patience:
-                smoothed_error = error_raw
+                smoothed_error     = error_raw
+                smoothed_lookahead = lookahead_raw
             else:
-                smoothed_error = ema_alpha * error_raw + (1.0 - ema_alpha) * smoothed_error
+                smoothed_error     = ema_alpha * error_raw     + (1.0 - ema_alpha) * smoothed_error
+                smoothed_lookahead = ema_alpha * lookahead_raw + (1.0 - ema_alpha) * smoothed_lookahead
             consecutive_lost = 0
-            error = smoothed_error
+            error     = smoothed_error
+            lookahead = smoothed_lookahead
         else:
             consecutive_lost += 1
-            error = float("nan") if consecutive_lost > lost_patience else smoothed_error
+            if consecutive_lost > lost_patience:
+                error     = float("nan")
+                lookahead = float("nan")
+            else:
+                error     = smoothed_error
+                lookahead = smoothed_lookahead
 
         # ── Overlay HUD on the full frame ──
         cv2.rectangle(frame, (0, roi_y0), (w - 1, h - 1), (0, 165, 255), 2)
@@ -308,8 +331,9 @@ def main():
             cv2.line(frame, (0, y), (w, y), (80, 80, 80), 1)
         frame[roi_y0:, :] = roi
 
-        err_str = "nan" if (error != error) else f"{error:+.3f}"
-        line1 = f"err={err_str}  strips={len(strip_points)}/{num_strips}  lost={consecutive_lost}"
+        err_str  = "nan" if (error    != error)    else f"{error:+.3f}"
+        look_str = "nan" if (lookahead != lookahead) else f"{lookahead:+.3f}"
+        line1 = f"err={err_str}  look={look_str}  strips={len(strip_points)}/{num_strips}  lost={consecutive_lost}"
         line2 = f"mask={mask_area}  {fit_status}"
         for y, txt in ((22, line1), (44, line2)):
             cv2.putText(frame, txt, (8, y), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 3)
@@ -347,8 +371,9 @@ def main():
                 ("min_contour_area",    str(min_area_t)),
                 ("min_solidity",        f"{solidity_t:.2f}"),
                 ("min_tape_width_px",   str(min_width_t)),
-                ("min_total_mask_area", str(min_total_mask_t)),
-                ("max_fit_residual_px", f"{max_residual_t:.1f}"),
+                ("min_total_mask_area",    str(min_total_mask_t)),
+                ("max_fit_residual_px",    f"{max_residual_t:.1f}"),
+                ("lookahead_row_fraction", f"{lookahead_frac_t:.2f}"),
             ])
 
     cap.release()
