@@ -13,7 +13,7 @@ camera_node:
     roi_height_percent: 1.00
     num_roi_strips: 3           # horizontal slices for multi-point line fit
     min_contour_area: 500       # px; per-strip minimum; below this a blob is ignored
-    min_solidity: 0.45          # area/convex_hull_area; nastro dritto ~1.0, L-corner ~0.5 (l'hull riempie l'angolo vuoto), erba <0.5. 0.45 = compromesso che lascia passare le curve ma scarta ciuffi.
+    min_solidity: 0.0           # area/convex_hull_area; 0.0 = disabilitato (l'L-corner ha solidity ~0.5 e veniva scartata). Restano area + width + total_mask_area come gate antirumore.
     min_tape_width_px: 15       # bounding-rect width per strip; eliminates narrow/pointy blobs
     min_total_mask_area: 3000   # px in the whole ROI mask; below this the scene is treated as empty
     max_fit_residual_px: 30.0   # mean |x_pred-x_actual| across strips; above this the line fit is rejected
