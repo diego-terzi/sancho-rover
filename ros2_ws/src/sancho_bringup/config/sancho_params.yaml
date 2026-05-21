@@ -13,7 +13,7 @@ camera_node:
     roi_height_percent: 1.00
     num_roi_strips: 3           # horizontal slices for multi-point line fit
     min_contour_area: 500       # px; per-strip minimum; below this a blob is ignored
-    min_solidity: 0.60          # area/convex_hull_area; tape ~0.8+, grass clumps <0.5
+    min_solidity: 0.45          # area/convex_hull_area; nastro dritto ~1.0, L-corner ~0.5 (l'hull riempie l'angolo vuoto), erba <0.5. 0.45 = compromesso che lascia passare le curve ma scarta ciuffi.
     min_tape_width_px: 15       # bounding-rect width per strip; eliminates narrow/pointy blobs
     min_total_mask_area: 3000   # px in the whole ROI mask; below this the scene is treated as empty
     max_fit_residual_px: 30.0   # mean |x_pred-x_actual| across strips; above this the line fit is rejected
@@ -27,11 +27,12 @@ controller_node:
   ros__parameters:
     motor_rpm: 300.0           # used to compute v_motor_max (must match motor_bridge_node)
     wheel_diameter: 0.09       # used to compute v_motor_max (must match motor_bridge_node)
-    max_linear_speed: 0.5      # m/s; HARD CAP on linear.x. Must be < v_motor_max (~1.41) so the outer track has PWM headroom for the steering differential — without this, sharp turns saturate one wheel and the rover plows straight.
+    max_linear_speed: 0.7      # m/s; HARD CAP on linear.x. Must be < v_motor_max (~1.41) così la ruota esterna ha PWM headroom per il differenziale in curva — senza cap, in curva l'esterna satura a v_max e il rover va dritto.
     pid_kp: 1.2                # PID on lateral trail error
     pid_ki: 0.0
     pid_kd: 0.1                # mild damping at higher speeds
-    slow_speed_ratio: 0.25     # fraction of v_motor_max when curve_intensity=1 (tight curve, here or ahead); slowdown ramps linearly from 1.0 at curve_intensity=0
+    slow_speed_ratio: 0.25     # frazione di v_motor_max a curve_intensity=1 (curva stretta, qui o davanti); rampa lineare da 1.0 a curve_intensity=0
+    curve_sensitivity: 2.0     # moltiplica max(|err|, |lookahead|) prima del clamp a 1.0. >1 = anticipa la frenata (a |lookahead|=0.5 sei già al minimo). Troppo alto = rallenta su micro-oscillazioni.
     trail_lost_timeout: 2.0    # seconds of NaN/silence before TRAIL_LOST
     obstacle_distance_m: 0.3   # meters; below this => OBSTACLE_STOP (needs sensor_node)
     control_rate_hz: 20.0      # Twist publish rate; also the PID dt

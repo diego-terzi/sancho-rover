@@ -8,8 +8,10 @@ State machine:
 
 Control law on FOLLOWING:
     angular.z = -(Kp*err + Ki*∫err + Kd*ḋerr)
-    curve_intensity = max(|err|, |lookahead_err|)   # react to *current* curve too,
-                                                    # not only what's ahead in ROI
+    curve_intensity = clip(curve_sensitivity * max(|err|, |lookahead|), 0, 1)
+              # curve_sensitivity > 1 anticipates braking: a moderate lookahead
+              # already saturates curve_intensity to 1, so we slow down BEFORE
+              # the curve gets sharp instead of mid-bend.
     linear.x  = min(max_linear_speed,
                     v_motor_max * (1 - (1 - slow_speed_ratio) * curve_intensity))
               # max_linear_speed caps top speed BELOW v_motor_max so we keep
@@ -38,11 +40,12 @@ class ControllerNode(Node):
         motor_rpm                = float(self.declare_parameter('motor_rpm', 300.0).value)
         wheel_diameter           = float(self.declare_parameter('wheel_diameter', 0.09).value)
         self.v_motor_max         = math.pi * wheel_diameter * motor_rpm / 60.0
-        self.max_linear_speed    = float(self.declare_parameter('max_linear_speed', 0.5).value)
+        self.max_linear_speed    = float(self.declare_parameter('max_linear_speed', 0.7).value)
         self.kp                  = float(self.declare_parameter('pid_kp', 1.5).value)
         self.ki                  = float(self.declare_parameter('pid_ki', 0.0).value)
         self.kd                  = float(self.declare_parameter('pid_kd', 0.1).value)
         self.slow_speed_ratio    = float(self.declare_parameter('slow_speed_ratio', 0.25).value)
+        self.curve_sensitivity   = float(self.declare_parameter('curve_sensitivity', 2.0).value)
         self.trail_lost_timeout  = float(self.declare_parameter('trail_lost_timeout', 2.0).value)
         self.obstacle_distance_m = float(self.declare_parameter('obstacle_distance_m', 0.3).value)
         self.control_rate_hz     = float(self.declare_parameter('control_rate_hz', 20.0).value)
@@ -129,10 +132,11 @@ class ControllerNode(Node):
             angular_z = -angular_correction
             angular_z = max(-self.max_angular_z, min(self.max_angular_z, angular_z))
 
-            # Slowdown driven by the worst of {current lateral error, lookahead}.
-            # Reacting only to lookahead misses curves that are already underway
-            # (low ROI, sharp bend), where |err| is large but |lookahead| isn't.
-            curve_intensity = min(1.0, max(abs(error), abs(self.last_lookahead_err)))
+            # Slowdown driven by the worst of {current lateral error, lookahead},
+            # amplified by curve_sensitivity so braking anticipates the curve
+            # rather than reacting mid-bend.
+            raw_intensity   = max(abs(error), abs(self.last_lookahead_err))
+            curve_intensity = min(1.0, self.curve_sensitivity * raw_intensity)
             speed = self.v_motor_max * (1.0 - (1.0 - self.slow_speed_ratio) * curve_intensity)
             # Hard cap — keeps PWM headroom for the steering differential.
             speed = min(speed, self.max_linear_speed)
