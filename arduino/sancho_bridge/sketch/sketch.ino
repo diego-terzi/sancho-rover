@@ -1,3 +1,138 @@
+/*
+
+#include "Arduino_RouterBridge.h"
+
+// ── Forward-only PWM pins ────────────────────────────────────────────────────
+#define LEFT_FRONT_RPWM_PIN    9
+#define RIGHT_FRONT_RPWM_PIN   6
+#define LEFT_BACK_RPWM_PIN    10
+#define RIGHT_BACK_RPWM_PIN    3
+
+#define FRONT_SCALE  0.90f
+#define BACK_SCALE   1.00f
+
+// ── Watchdog ─────────────────────────────────────────────────────────────────
+#define MOTOR_WATCHDOG_MS  500UL
+
+const int LED_PIN = 12;
+const int BUZZER_PIN = 5;
+
+const int C_SHARP = 277;  // C#4
+const int B_NOTE  = 247;  // B3
+const int E_NOTE  = 330;  // E4
+const int REST    = 0;
+
+unsigned long lastSetMotorsMs    = 0;
+unsigned long lastSetMotorsLogMs = 0;
+uint32_t      setMotorsCallCount = 0;
+
+void applyMotor(int rpwm_pin, int pwm);
+void stopMotors();
+
+// ── RPC handlers ─────────────────────────────────────────────────────────────
+void setMotors(int left, int right) {
+    int left_front  = (int)(left  * FRONT_SCALE);
+    int right_front = (int)(right * FRONT_SCALE);
+    int left_back   = (int)(left  * BACK_SCALE);
+    int right_back  = (int)(right * BACK_SCALE);
+
+    applyMotor(LEFT_FRONT_RPWM_PIN,  left_front);
+    applyMotor(RIGHT_FRONT_RPWM_PIN, right_front);
+    applyMotor(LEFT_BACK_RPWM_PIN,   left_back);
+    applyMotor(RIGHT_BACK_RPWM_PIN,  right_back);
+
+    lastSetMotorsMs = millis();
+
+    // Diagnostic — once every 5 s
+    setMotorsCallCount++;
+    if (millis() - lastSetMotorsLogMs > 5000UL) {
+        lastSetMotorsLogMs = millis();
+        Monitor.print("[setMotors #");
+        Monitor.print(setMotorsCallCount);
+        Monitor.print("] L=");
+        Monitor.print(left);
+        Monitor.print(" R=");
+        Monitor.println(right);
+    }
+}
+
+struct Step { int freq; int duration; };
+
+// Tempi misurati dal waveform: loop totale ~2000 ms
+const Step riff[] = {
+  {C_SHARP, 150}, {REST,  50},    // nota 1  (0 → 200 ms)
+  {B_NOTE,  150}, {REST,  50},    // nota 2  (200 → 400 ms)
+  {C_SHARP, 200}, {REST, 300},    // nota 3 + pausa lunga  (400 → 900 ms)
+  {E_NOTE,  400}, {REST, 100},    // nota 4 accentata  (900 → 1400 ms)
+  {C_SHARP, 250}, {REST,  50},    // nota 5  (1400 → 1700 ms)
+  {C_SHARP, 200}, {REST, 100}     // nota 6 + silenzio di fine loop  (1700 → 2000 ms)
+};
+const int STEPS = sizeof(riff) / sizeof(Step);
+
+void emergencyStop() {
+    stopMotors();
+    lastSetMotorsMs = 0;
+}
+
+// ── Setup ────────────────────────────────────────────────────────────────────
+void setup() {
+    pinMode(LED_PIN, OUTPUT);
+    pinMode(BUZZER_PIN, OUTPUT);
+    Bridge.begin();
+    Monitor.begin();
+
+    // Force PWM peripheral init: brief PWM=1 pulse then 0. Without this, the
+    // first analogWrite(0) on a fresh pin can leave the peripheral inert.
+    analogWrite(LEFT_FRONT_RPWM_PIN,  1);
+    analogWrite(RIGHT_FRONT_RPWM_PIN, 1);
+    analogWrite(LEFT_BACK_RPWM_PIN,   1);
+    analogWrite(RIGHT_BACK_RPWM_PIN,  1);
+    delay(50);
+    stopMotors();
+
+    Bridge.provide_safe("set_motors",     setMotors);
+    Bridge.provide_safe("emergency_stop", emergencyStop);
+
+    Monitor.println("[sancho_bridge] MCU ready (motors-only)");
+}
+
+// ── Main loop ────────────────────────────────────────────────────────────────
+void loop() {
+    if (millis() - lastSetMotorsMs > MOTOR_WATCHDOG_MS) {
+        stopMotors();
+    }
+}
+
+// ── Motor helpers ────────────────────────────────────────────────────────────
+void applyMotor(int rpwm_pin, int pwm) {
+    if (pwm < 0)   pwm = 0;
+    if (pwm > 255) pwm = 255;
+    analogWrite(rpwm_pin, pwm);
+}
+
+void stopMotors() {
+    analogWrite(LEFT_FRONT_RPWM_PIN,  0);
+    analogWrite(RIGHT_FRONT_RPWM_PIN, 0);
+    analogWrite(LEFT_BACK_RPWM_PIN,   0);
+    analogWrite(RIGHT_BACK_RPWM_PIN,  0);
+
+    for (int i = 0; i < STEPS; i++) {
+    int f = riff[i].freq;
+    int d = riff[i].duration;
+
+    if (f == REST) {
+      digitalWrite(LED_PIN, LOW);
+      noTone(BUZZER_PIN);
+    } else {
+      digitalWrite(LED_PIN, HIGH);
+      tone(BUZZER_PIN, f);
+    }
+    delay(d);
+  }
+
+}
+*/
+
 // SANCHO MCU firmware — 4WD motor control + end-of-mission signal.
 //
 // Motors: 4 BTS7960 modules driven on their RPWM input only (forward-only).
