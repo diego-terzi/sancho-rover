@@ -1,71 +1,68 @@
 """
-Camera node: detect a tape trail by its *shape* (not colour) and publish a
-normalised lateral error in [-1, 1] on /trail_error.
+Camera node: detect a tape trail by LAB colour + CLAHE and publish two topics:
 
-Two pure functions do the work; the ROS node just wires them to a video
-stream and a publisher.
+  /trail_error            Float32 in [-1, 1]  — lateral error at the bottom of ROI
+                          (drives PID steering)
+  /trail_lookahead_error  Float32 in [-1, 1]  — lateral error projected further ahead
+                          (drives speed reduction before curves)
 
-  shape_mask(roi_bgr, ...) -> uint8 binary mask
-      Pipeline: grayscale + CLAHE → morphological top-hat AND black-hat
-      with a horizontal kernel ~2× the expected tape width (matched filter
-      for narrow vertical stripes of *either* polarity, light-on-dark or
-      dark-on-light) → threshold → cleanup → connected-component filter
-      by area and elongation.
+Two pure functions do the work; CameraNode wires them to the camera.
 
-  mask_to_error(mask, ...) -> (error, lookahead_err), each float in [-1, 1] or None
-      Splits the mask into horizontal strips, picks each strip's largest
-      blob centroid, fits a line through ≥ 2 centroids, then projects it to
-      two rows:
-        - the bottom of the ROI → `error` (drives PID steering)
-        - a row higher up (controlled by `lookahead_row_fraction`) → `lookahead_err`
-          (drives speed reduction in the controller_node)
-      `lookahead_err` is clamped so it never extrapolates above the topmost
-      detected centroid. Returns (None, None) if the fit is rejected.
+  lab_mask(roi_bgr, ...) -> uint8 binary mask
+      BGR -> LAB, CLAHE on L channel, inRange on A+B, morphology cleanup,
+      blob quality filter (area, solidity, width).
+
+  mask_to_error(mask, ...) -> (error, lookahead_err)
+      Splits the mask into horizontal strips, picks each strip's largest blob
+      centroid, fits a line through >= 2 centroids, projects it to:
+        - bottom of ROI  -> error
+        - lookahead_row_fraction from top -> lookahead_err (clamped to topmost centroid)
+      Returns (None, None) if fit is rejected or too few strips.
 """
+
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Float32
 import cv2
 import numpy as np
 
-def shape_mask(roi_bgr, *,
-               tape_width_px,
-               stripe_threshold,
-               min_blob_area,
-               min_elongation,
-               clahe_clip,
-               clahe_tile):
-    """Binary mask of narrow vertical stripes ~tape_width_px wide. No colour cues."""
-    gray  = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2GRAY)
-    clahe = cv2.createCLAHE(clipLimit=clahe_clip,
-                            tileGridSize=(clahe_tile, clahe_tile))
-    gray  = clahe.apply(gray)
 
-    # Kernel wider than the tape → opening removes the tape → top-hat recovers it.
-    # Wide horizontally so vertical stripes are the ones suppressed by the opening.
-    kw     = max(3, int(tape_width_px * 2) | 1)  # force odd width
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (kw, 3))
-    tophat   = cv2.morphologyEx(gray, cv2.MORPH_TOPHAT,   kernel)  # bright stripes
-    blackhat = cv2.morphologyEx(gray, cv2.MORPH_BLACKHAT, kernel)  # dark stripes
-    stripe_response = np.maximum(tophat, blackhat)
+def lab_mask(roi_bgr, *,
+             lab_lower, lab_upper,
+             clahe_clip, clahe_tile,
+             morph_k,
+             min_contour_area, min_solidity, min_tape_width_px,
+             min_total_mask_area):
+    """LAB+CLAHE colour mask with blob quality filtering."""
+    lab              = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2LAB)
+    l_ch, a_ch, b_ch = cv2.split(lab)
+    clahe            = cv2.createCLAHE(clipLimit=clahe_clip,
+                                       tileGridSize=(clahe_tile, clahe_tile))
+    l_eq             = clahe.apply(l_ch)
+    lab_eq           = cv2.merge([l_eq, a_ch, b_ch])
 
-    _, mask = cv2.threshold(stripe_response, stripe_threshold, 255, cv2.THRESH_BINARY)
+    mask   = cv2.inRange(lab_eq, lab_lower, lab_upper)
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (morph_k, morph_k))
+    mask   = cv2.morphologyEx(mask, cv2.MORPH_OPEN,  kernel)
+    mask   = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
 
-    # Open to kill speckle; close vertically to bridge gaps along the stripe.
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN,
-                            cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)))
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE,
-                            cv2.getStructuringElement(cv2.MORPH_RECT, (3, 11)))
+    if cv2.countNonZero(mask) < min_total_mask_area:
+        return np.zeros_like(mask)
 
-    n_labels, labels, stats, _ = cv2.connectedComponentsWithStats(mask)
+    # Keep only tape-like blobs: sufficient area, solidity and width.
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     out = np.zeros_like(mask)
-    for i in range(1, n_labels):
-        _, _, w_box, h_box, area = stats[i]
-        if area < min_blob_area:
+    for cnt in contours:
+        area = cv2.contourArea(cnt)
+        if area < min_contour_area:
             continue
-        if max(w_box, h_box) / max(1, min(w_box, h_box)) < min_elongation:
+        hull_area = cv2.contourArea(cv2.convexHull(cnt))
+        if hull_area == 0 or area / hull_area < min_solidity:
             continue
-        out[labels == i] = 255
+        _, _, w, _ = cv2.boundingRect(cnt)
+        if w < min_tape_width_px:
+            continue
+        cv2.drawContours(out, [cnt], -1, 255, -1)
     return out
 
 
@@ -92,9 +89,9 @@ def mask_to_error(mask, *,
         if cv2.contourArea(largest) < min_strip_area:
             continue
         M = cv2.moments(largest)
-        if M["m00"] == 0:
+        if M['m00'] == 0:
             continue
-        centroids.append((M["m10"] / M["m00"], y0 + M["m01"] / M["m00"]))
+        centroids.append((M['m10'] / M['m00'], y0 + M['m01'] / M['m00']))
 
     if len(centroids) < 2:
         return None, None
@@ -108,9 +105,8 @@ def mask_to_error(mask, *,
     x_bottom = a * h + b
     error    = float(np.clip((x_bottom - half_w) / half_w, -1.0, 1.0))
 
-    # Lookahead: project the same line to a row higher in the ROI (= further
-    # ahead in space). Clamped so we never extrapolate above the topmost
-    # detected centroid, which would amplify fit noise on short trails.
+    # Project line further ahead; clamped to topmost detected centroid
+    # so we never extrapolate beyond what was actually seen.
     top_detected_y = float(pts[:, 1].min())
     lookahead_y    = max(h * lookahead_row_fraction, top_detected_y)
     x_lookahead    = a * lookahead_y + b
@@ -123,24 +119,38 @@ class CameraNode(Node):
     def __init__(self):
         super().__init__('camera_node')
 
-        # Frame / ROI
-        self.roi_height_percent  = float(self.declare_parameter('roi_height_percent',  0.60).value)
-        self.publish_rate_hz     = float(self.declare_parameter('publish_rate_hz',     30.0).value)
-        # shape_mask params
-        self.tape_width_px       = int(self.declare_parameter('tape_width_px',           41).value)
-        self.stripe_threshold    = int(self.declare_parameter('stripe_threshold',        25).value)
-        self.min_blob_area       = int(self.declare_parameter('min_blob_area',          800).value)
-        self.min_elongation      = float(self.declare_parameter('min_elongation',        3.0).value)
-        self.clahe_clip          = float(self.declare_parameter('clahe_clip',            2.0).value)
-        self.clahe_tile          = int(self.declare_parameter('clahe_tile',                8).value)
-        # mask_to_error params
-        self.num_strips          = int(self.declare_parameter('num_roi_strips',            3).value)
-        self.min_strip_area      = int(self.declare_parameter('min_strip_area',          500).value)
+        # ROI / frame
+        self.roi_height_percent = float(self.declare_parameter('roi_height_percent', 0.70).value)
+        self.publish_rate_hz    = float(self.declare_parameter('publish_rate_hz',   30.0).value)
+
+        # LAB colour params
+        lab_a_min = int(self.declare_parameter('lab_a_min', 100).value)
+        lab_a_max = int(self.declare_parameter('lab_a_max', 145).value)
+        lab_b_min = int(self.declare_parameter('lab_b_min',  60).value)
+        lab_b_max = int(self.declare_parameter('lab_b_max', 115).value)
+        self.lab_lower = np.array([0,   lab_a_min, lab_b_min], dtype=np.uint8)
+        self.lab_upper = np.array([255, lab_a_max, lab_b_max], dtype=np.uint8)
+
+        # CLAHE + morphology
+        self.clahe_clip  = float(self.declare_parameter('clahe_clip',      2.0).value)
+        self.clahe_tile  = int(  self.declare_parameter('clahe_tile',        8).value)
+        self.morph_k     = int(  self.declare_parameter('morph_kernel_size', 5).value)
+
+        # Blob quality gate
+        self.min_contour_area    = int(  self.declare_parameter('min_contour_area',      500).value)
+        self.min_solidity        = float(self.declare_parameter('min_solidity',         0.60).value)
+        self.min_tape_width_px   = int(  self.declare_parameter('min_tape_width_px',      15).value)
+        self.min_total_mask_area = int(  self.declare_parameter('min_total_mask_area', 3000).value)
+
+        # Strip → fit params
+        self.num_strips             = int(  self.declare_parameter('num_roi_strips',            3).value)
+        self.min_strip_area         = int(  self.declare_parameter('min_strip_area',          300).value)
         self.max_fit_residual_px    = float(self.declare_parameter('max_fit_residual_px',    30.0).value)
-        self.lookahead_row_fraction = float(self.declare_parameter('lookahead_row_fraction', 0.0).value)
+        self.lookahead_row_fraction = float(self.declare_parameter('lookahead_row_fraction',  0.0).value)
+
         # Smoothing / debounce
-        self.ema_alpha           = float(self.declare_parameter('ema_alpha',             0.3).value)
-        self.lost_trail_patience = int(self.declare_parameter('lost_trail_patience',       5).value)
+        self.ema_alpha           = float(self.declare_parameter('ema_alpha',           0.3).value)
+        self.lost_trail_patience = int(  self.declare_parameter('lost_trail_patience',   5).value)
 
         self.smoothed_error         = 0.0
         self.smoothed_lookahead_err = 0.0
@@ -149,13 +159,18 @@ class CameraNode(Node):
         self.error_pub     = self.create_publisher(Float32, 'trail_error',           1)
         self.lookahead_pub = self.create_publisher(Float32, 'trail_lookahead_error', 1)
 
-        self.cap = cv2.VideoCapture(0)
+        cam_idx = int(self.declare_parameter('camera_index', 0).value)
+        self.cap = cv2.VideoCapture(cam_idx)
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH,
+                     int(self.declare_parameter('frame_width',  640).value))
+        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT,
+                     int(self.declare_parameter('frame_height', 480).value))
         if not self.cap.isOpened():
             self.get_logger().error('Webcam not accessible')
             raise RuntimeError('Camera open failed')
 
         self.timer = self.create_timer(1.0 / self.publish_rate_hz, self.process_frame)
-        self.get_logger().info('Camera node started (shape-based detector)')
+        self.get_logger().info('Camera node started (LAB+CLAHE detector with lookahead)')
 
     def process_frame(self):
         ret, frame = self.cap.read()
@@ -166,14 +181,17 @@ class CameraNode(Node):
         h   = frame.shape[0]
         roi = frame[int(h * (1.0 - self.roi_height_percent)):, :]
 
-        mask = shape_mask(
+        mask = lab_mask(
             roi,
-            tape_width_px    = self.tape_width_px,
-            stripe_threshold = self.stripe_threshold,
-            min_blob_area    = self.min_blob_area,
-            min_elongation   = self.min_elongation,
-            clahe_clip       = self.clahe_clip,
-            clahe_tile       = self.clahe_tile,
+            lab_lower          = self.lab_lower,
+            lab_upper          = self.lab_upper,
+            clahe_clip         = self.clahe_clip,
+            clahe_tile         = self.clahe_tile,
+            morph_k            = self.morph_k,
+            min_contour_area   = self.min_contour_area,
+            min_solidity       = self.min_solidity,
+            min_tape_width_px  = self.min_tape_width_px,
+            min_total_mask_area= self.min_total_mask_area,
         )
 
         error_raw, lookahead_err_raw = mask_to_error(
@@ -209,8 +227,8 @@ class CameraNode(Node):
                 error         = self.smoothed_error
                 lookahead_err = self.smoothed_lookahead_err
 
-        err_msg  = Float32(); err_msg.data  = error
-        look_msg = Float32(); look_msg.data = lookahead_err
+        err_msg      = Float32(); err_msg.data  = error
+        look_msg     = Float32(); look_msg.data = lookahead_err
         self.error_pub.publish(err_msg)
         self.lookahead_pub.publish(look_msg)
 
@@ -228,6 +246,7 @@ def main(args=None):
         pass
     finally:
         node.destroy_node()
+        rclpy.shutdown()
 
 
 if __name__ == '__main__':
