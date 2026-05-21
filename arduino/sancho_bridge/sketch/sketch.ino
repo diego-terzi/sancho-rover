@@ -168,6 +168,10 @@ void stopMotors() {
 #define LED_PIN       12
 #define BUZZER_PIN     5
 
+// ── Ultrasonic sensor pins ───────────────────────────────────────────────────
+#define TRIG_PIN   2
+#define ECHO_PIN   4
+
 // ── Timing ──────────────────────────────────────────────────────────────────
 #define MOTOR_WATCHDOG_MS         500UL
 #define CELEB_STOP_DEBOUNCE_MS   2000UL  // motors stopped this long → trigger riff
@@ -204,6 +208,7 @@ unsigned long celebStepStartMs     = 0;
 void applyMotor(int rpwm_pin, int pwm);
 void stopMotors();
 void updateCelebration();
+int  getDistance();
 
 // ── RPC handlers (called by Bridge.provide_safe) ─────────────────────────────
 void setMotors(int left, int right) {
@@ -250,6 +255,22 @@ void emergencyStop() {
     lastSetMotorsMs = 0;
 }
 
+// ── Ultrasonic sensor ────────────────────────────────────────────────────────
+static int readDistanceCm() {
+    digitalWrite(TRIG_PIN, LOW);
+    delayMicroseconds(2);
+    digitalWrite(TRIG_PIN, HIGH);
+    delayMicroseconds(10);
+    digitalWrite(TRIG_PIN, LOW);
+    uint32_t duration = pulseIn(ECHO_PIN, HIGH, 15000);
+    if (duration == 0) return 999;
+    return (int)((duration * 343UL) / 20000UL);
+}
+
+int getDistance() {
+    return readDistanceCm();
+}
+
 // ── Setup ───────────────────────────────────────────────────────────────────
 void setup() {
     Bridge.begin();
@@ -268,10 +289,14 @@ void setup() {
     digitalWrite(LED_PIN, LOW);
     noTone(BUZZER_PIN);
 
+    pinMode(TRIG_PIN, OUTPUT);
+    pinMode(ECHO_PIN, INPUT);
+
     Bridge.provide_safe("set_motors",     setMotors);
     Bridge.provide_safe("emergency_stop", emergencyStop);
+    Bridge.provide_safe("get_distance",   getDistance);
 
-    Monitor.println("[sancho_bridge] MCU ready (4WD + end-of-mission signal)");
+    Monitor.println("[sancho_bridge] MCU ready (4WD + ultrasonic + end-of-mission signal)");
 }
 
 // ── Main loop ───────────────────────────────────────────────────────────────
