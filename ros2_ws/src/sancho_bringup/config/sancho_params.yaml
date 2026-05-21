@@ -27,7 +27,7 @@ controller_node:
   ros__parameters:
     motor_rpm: 300.0           # used to compute v_motor_max (must match motor_bridge_node)
     wheel_diameter: 0.09       # used to compute v_motor_max (must match motor_bridge_node)
-    max_linear_speed: 0.7      # m/s; HARD CAP on linear.x. Must be < v_motor_max (~1.41) così la ruota esterna ha PWM headroom per il differenziale in curva — senza cap, in curva l'esterna satura a v_max e il rover va dritto.
+    max_linear_speed: 1.4      # m/s; HARD CAP on linear.x. 1.4 ≈ v_motor_max → cap di fatto disattivato, full speed in rettilineo. In curva ci pensa slow_speed_ratio + curve_sensitivity a tagliare la velocità prima della saturazione.
     pid_kp: 1.2                # PID on lateral trail error
     pid_ki: 0.0
     pid_kd: 0.1                # mild damping at higher speeds
