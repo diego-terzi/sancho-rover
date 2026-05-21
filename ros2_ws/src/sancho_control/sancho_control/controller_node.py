@@ -8,10 +8,13 @@ State machine:
 
 Control law on FOLLOWING:
     angular.z = -(Kp*err + Ki*∫err + Kd*ḋerr)
-    linear.x  = max_speed * (1 - (1 - slow_speed_ratio) * |lookahead_err|)
-              # lookahead_err = trail position at a row higher in the ROI,
-              # i.e. "where the trail is going", from /trail_lookahead_error.
-              # 0 → full speed, ±1 → slow_speed_ratio * max_speed.
+    curve_intensity = max(|err|, |lookahead_err|)   # react to *current* curve too,
+                                                    # not only what's ahead in ROI
+    linear.x  = min(max_linear_speed,
+                    v_motor_max * (1 - (1 - slow_speed_ratio) * curve_intensity))
+              # max_linear_speed caps top speed BELOW v_motor_max so we keep
+              # PWM headroom for the differential — otherwise the outer track
+              # saturates at v_max and the rover can't actually turn sharply.
 """
 
 import math
@@ -34,11 +37,12 @@ class ControllerNode(Node):
 
         motor_rpm                = float(self.declare_parameter('motor_rpm', 300.0).value)
         wheel_diameter           = float(self.declare_parameter('wheel_diameter', 0.09).value)
-        self.max_speed           = math.pi * wheel_diameter * motor_rpm / 60.0
+        self.v_motor_max         = math.pi * wheel_diameter * motor_rpm / 60.0
+        self.max_linear_speed    = float(self.declare_parameter('max_linear_speed', 0.5).value)
         self.kp                  = float(self.declare_parameter('pid_kp', 1.5).value)
         self.ki                  = float(self.declare_parameter('pid_ki', 0.0).value)
         self.kd                  = float(self.declare_parameter('pid_kd', 0.1).value)
-        self.slow_speed_ratio    = float(self.declare_parameter('slow_speed_ratio', 0.5).value)
+        self.slow_speed_ratio    = float(self.declare_parameter('slow_speed_ratio', 0.25).value)
         self.trail_lost_timeout  = float(self.declare_parameter('trail_lost_timeout', 2.0).value)
         self.obstacle_distance_m = float(self.declare_parameter('obstacle_distance_m', 0.3).value)
         self.control_rate_hz     = float(self.declare_parameter('control_rate_hz', 20.0).value)
@@ -125,12 +129,13 @@ class ControllerNode(Node):
             angular_z = -angular_correction
             angular_z = max(-self.max_angular_z, min(self.max_angular_z, angular_z))
 
-            # Speed reduced proportionally to how much the trail curves *ahead*
-            # of the rover. lookahead_err = 0 → full max_speed; lookahead_err = ±1
-            # → max_speed * slow_speed_ratio. Linear ramp in between. Steering is
-            # unaffected — only the longitudinal velocity is modulated.
-            curve_intensity = min(1.0, abs(self.last_lookahead_err))
-            speed = self.max_speed * (1.0 - (1.0 - self.slow_speed_ratio) * curve_intensity)
+            # Slowdown driven by the worst of {current lateral error, lookahead}.
+            # Reacting only to lookahead misses curves that are already underway
+            # (low ROI, sharp bend), where |err| is large but |lookahead| isn't.
+            curve_intensity = min(1.0, max(abs(error), abs(self.last_lookahead_err)))
+            speed = self.v_motor_max * (1.0 - (1.0 - self.slow_speed_ratio) * curve_intensity)
+            # Hard cap — keeps PWM headroom for the steering differential.
+            speed = min(speed, self.max_linear_speed)
 
             cmd.linear.x  = speed
             cmd.angular.z = angular_z

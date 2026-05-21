@@ -10,14 +10,14 @@ camera_node:
     lab_b_max: 115              # B channel upper bound — tune with visualizer drag-to-sample
     clahe_clip: 2.0             # CLAHE clipLimit — aggressiveness of local contrast normalisation
     clahe_tile: 8               # CLAHE tileGridSize (n×n grid)
-    roi_height_percent: 0.70
+    roi_height_percent: 1.00
     num_roi_strips: 3           # horizontal slices for multi-point line fit
     min_contour_area: 500       # px; per-strip minimum; below this a blob is ignored
     min_solidity: 0.60          # area/convex_hull_area; tape ~0.8+, grass clumps <0.5
     min_tape_width_px: 15       # bounding-rect width per strip; eliminates narrow/pointy blobs
     min_total_mask_area: 3000   # px in the whole ROI mask; below this the scene is treated as empty
     max_fit_residual_px: 30.0   # mean |x_pred-x_actual| across strips; above this the line fit is rejected
-    lookahead_row_fraction: 0.0 # row to project for /trail_lookahead_error: 0=top of ROI (max anticipation, auto-clamped to topmost centroid); 1=bottom (no anticipation)
+    lookahead_row_fraction: 0.00 # row to project for /trail_lookahead_error: 0=top of ROI (max anticipation, auto-clamped to topmost centroid); 1=bottom (no anticipation)
     morph_kernel_size: 5        # erosion/dilation kernel; increase on noisy images
     ema_alpha: 0.3              # EMA weight on new sample (0=frozen, 1=no smoothing)
     lost_trail_patience: 5      # frames to coast before publishing NaN
@@ -25,12 +25,13 @@ camera_node:
 
 controller_node:
   ros__parameters:
-    motor_rpm: 300.0           # used to compute v_max (must match motor_bridge_node)
-    wheel_diameter: 0.09       # used to compute v_max (must match motor_bridge_node)
+    motor_rpm: 300.0           # used to compute v_motor_max (must match motor_bridge_node)
+    wheel_diameter: 0.09       # used to compute v_motor_max (must match motor_bridge_node)
+    max_linear_speed: 0.5      # m/s; HARD CAP on linear.x. Must be < v_motor_max (~1.41) so the outer track has PWM headroom for the steering differential — without this, sharp turns saturate one wheel and the rover plows straight.
     pid_kp: 1.2                # PID on lateral trail error
     pid_ki: 0.0
     pid_kd: 0.1                # mild damping at higher speeds
-    slow_speed_ratio: 0.5      # minimum fraction of max_speed when lookahead_err = ±1 (tight curve ahead); linear ramp from 1.0 at lookahead_err = 0
+    slow_speed_ratio: 0.25     # fraction of v_motor_max when curve_intensity=1 (tight curve, here or ahead); slowdown ramps linearly from 1.0 at curve_intensity=0
     trail_lost_timeout: 2.0    # seconds of NaN/silence before TRAIL_LOST
     obstacle_distance_m: 0.3   # meters; below this => OBSTACLE_STOP (needs sensor_node)
     control_rate_hz: 20.0      # Twist publish rate; also the PID dt
