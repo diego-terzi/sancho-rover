@@ -9,11 +9,14 @@ Camera node: detect a tape trail by LAB colour + CLAHE and publish two topics:
 Two pure functions do the work; CameraNode wires them to the camera.
 
   lab_mask(roi_bgr, ...) -> uint8 binary mask
-      BGR -> LAB, CLAHE on L channel, inRange on A+B, morphology cleanup,
-      blob quality filter (area, solidity, width).
+      BGR -> LAB, CLAHE on L channel, inRange on A+B, morphology cleanup.
+      Returns the *raw* colour mask (zeroed if the whole-ROI mask is too small).
+      Blob quality filtering happens per-strip in mask_to_error, NOT here — this
+      matches tools/visualize_camera_pipeline.py so what you tune is what runs.
 
   mask_to_error(mask, ...) -> (error, lookahead_err)
-      Splits the mask into horizontal strips, picks each strip's largest blob
+      Splits the mask into horizontal strips. In each strip keeps the largest
+      *tape-like* blob (area + solidity + width + elongation gate), takes its
       centroid, fits a line through >= 2 centroids, projects it to:
         - bottom of ROI  -> error
         - lookahead_row_fraction from top -> lookahead_err (clamped to topmost centroid)
@@ -31,9 +34,12 @@ def lab_mask(roi_bgr, *,
              lab_lower, lab_upper,
              clahe_clip, clahe_tile,
              morph_k,
-             min_contour_area, min_solidity, min_tape_width_px,
              min_total_mask_area):
-    """LAB+CLAHE colour mask with blob quality filtering."""
+    """LAB+CLAHE colour mask + morphology. Raw binary mask, no per-blob filter.
+
+    Returns all zeros if the total mask area is below min_total_mask_area
+    (scene treated as empty). Blob quality filtering is done per-strip in
+    mask_to_error, mirroring the visualizer."""
     lab              = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2LAB)
     l_ch, a_ch, b_ch = cv2.split(lab)
     clahe            = cv2.createCLAHE(clipLimit=clahe_clip,
@@ -48,30 +54,42 @@ def lab_mask(roi_bgr, *,
 
     if cv2.countNonZero(mask) < min_total_mask_area:
         return np.zeros_like(mask)
+    return mask
 
-    # Keep only tape-like blobs: sufficient area, solidity and width.
-    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    out = np.zeros_like(mask)
-    for cnt in contours:
-        area = cv2.contourArea(cnt)
-        if area < min_contour_area:
-            continue
-        hull_area = cv2.contourArea(cv2.convexHull(cnt))
-        if hull_area == 0 or area / hull_area < min_solidity:
-            continue
-        _, _, w, _ = cv2.boundingRect(cnt)
-        if w < min_tape_width_px:
-            continue
-        cv2.drawContours(out, [cnt], -1, 255, -1)
-    return out
+
+def is_tape_like(cnt, *, min_area, min_solidity, min_width_px, min_elongation):
+    """Per-blob gate: area + solidity + bounding-rect width + elongation.
+
+    Elongation = long_side / short_side of the *rotated* min-area rect, so it
+    measures how line-like a blob is regardless of orientation (a 45° tape is
+    just as elongated as a vertical one). Roundish grass/clutter blobs
+    (elongation ~1) are rejected; a continuous straight-or-angled tape segment
+    is long and thin (elongation high)."""
+    area = cv2.contourArea(cnt)
+    if area < min_area:
+        return False
+    hull_area = cv2.contourArea(cv2.convexHull(cnt))
+    if hull_area == 0 or area / hull_area < min_solidity:
+        return False
+    _, _, w, _ = cv2.boundingRect(cnt)
+    if w < min_width_px:
+        return False
+    (_, _), (rw, rh), _ = cv2.minAreaRect(cnt)
+    short = min(rw, rh)
+    if short < 1.0:
+        return False
+    return (max(rw, rh) / short) >= min_elongation
 
 
 def mask_to_error(mask, *,
                   num_strips,
-                  min_strip_area,
+                  min_contour_area, min_solidity, min_tape_width_px, min_elongation,
                   max_fit_residual_px,
                   lookahead_row_fraction):
-    """Reduce a binary mask to (error, lookahead_err); both in [-1,1] or both None."""
+    """Reduce a binary mask to (error, lookahead_err); both in [-1,1] or both None.
+
+    Per strip, keep the largest tape-like blob (area+solidity+width+elongation),
+    take its centroid, fit a line through >= 2 centroids."""
     h, w    = mask.shape
     half_w  = w / 2.0
     strip_h = h // num_strips
@@ -83,11 +101,14 @@ def mask_to_error(mask, *,
         contours, _ = cv2.findContours(
             mask[y0:y1, :], cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
         )
-        if not contours:
+        tape_like = [
+            c for c in contours
+            if is_tape_like(c, min_area=min_contour_area, min_solidity=min_solidity,
+                            min_width_px=min_tape_width_px, min_elongation=min_elongation)
+        ]
+        if not tape_like:
             continue
-        largest = max(contours, key=cv2.contourArea)
-        if cv2.contourArea(largest) < min_strip_area:
-            continue
+        largest = max(tape_like, key=cv2.contourArea)
         M = cv2.moments(largest)
         if M['m00'] == 0:
             continue
@@ -136,15 +157,15 @@ class CameraNode(Node):
         self.clahe_tile  = int(  self.declare_parameter('clahe_tile',        8).value)
         self.morph_k     = int(  self.declare_parameter('morph_kernel_size', 5).value)
 
-        # Blob quality gate
+        # Per-strip blob quality gate
         self.min_contour_area    = int(  self.declare_parameter('min_contour_area',      500).value)
         self.min_solidity        = float(self.declare_parameter('min_solidity',         0.60).value)
         self.min_tape_width_px   = int(  self.declare_parameter('min_tape_width_px',      15).value)
+        self.min_elongation      = float(self.declare_parameter('min_elongation',        2.5).value)
         self.min_total_mask_area = int(  self.declare_parameter('min_total_mask_area', 3000).value)
 
         # Strip → fit params
         self.num_strips             = int(  self.declare_parameter('num_roi_strips',            3).value)
-        self.min_strip_area         = int(  self.declare_parameter('min_strip_area',          300).value)
         self.max_fit_residual_px    = float(self.declare_parameter('max_fit_residual_px',    30.0).value)
         self.lookahead_row_fraction = float(self.declare_parameter('lookahead_row_fraction',  0.0).value)
 
@@ -188,16 +209,16 @@ class CameraNode(Node):
             clahe_clip         = self.clahe_clip,
             clahe_tile         = self.clahe_tile,
             morph_k            = self.morph_k,
-            min_contour_area   = self.min_contour_area,
-            min_solidity       = self.min_solidity,
-            min_tape_width_px  = self.min_tape_width_px,
             min_total_mask_area= self.min_total_mask_area,
         )
 
         error_raw, lookahead_err_raw = mask_to_error(
             mask,
             num_strips             = self.num_strips,
-            min_strip_area         = self.min_strip_area,
+            min_contour_area       = self.min_contour_area,
+            min_solidity           = self.min_solidity,
+            min_tape_width_px      = self.min_tape_width_px,
+            min_elongation         = self.min_elongation,
             max_fit_residual_px    = self.max_fit_residual_px,
             lookahead_row_fraction = self.lookahead_row_fraction,
         )
