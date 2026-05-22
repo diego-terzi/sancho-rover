@@ -15,6 +15,7 @@ camera_node:
     min_contour_area: 500       # px; per-strip minimum; below this a blob is ignored
     min_solidity: 0.0           # area/convex_hull_area; 0.0 = disabilitato (l'L-corner ha solidity ~0.5 e veniva scartata). Restano area + width + total_mask_area come gate antirumore.
     min_tape_width_px: 15       # bounding-rect width per strip; eliminates narrow/pointy blobs
+    min_elongation: 2.5         # long/short side del minAreaRect (rettangolo ruotato); linea (dritta o ad angolo) ~3+, ciuffi d'erba tondeggianti ~1 -> scartati. Funziona a ogni orientamento.
     min_total_mask_area: 3000   # px in the whole ROI mask; below this the scene is treated as empty
     max_fit_residual_px: 30.0   # mean |x_pred-x_actual| across strips; above this the line fit is rejected
     lookahead_row_fraction: 0.00 # row to project for /trail_lookahead_error: 0=top of ROI (max anticipation, auto-clamped to topmost centroid); 1=bottom (no anticipation)

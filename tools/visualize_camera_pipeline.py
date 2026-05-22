@@ -122,8 +122,14 @@ def nothing(_):
     pass
 
 
-def is_tape_like(cnt, min_area, min_solidity, min_width_px):
-    """Mirror of CameraNode._is_tape_like: area + solidity + bounding-rect-width gate."""
+def is_tape_like(cnt, min_area, min_solidity, min_width_px, min_elongation):
+    """Mirror of CameraNode._is_tape_like: area + solidity + width + elongation gate.
+
+    Elongation = long_side / short_side of the *rotated* min-area rect, so it
+    measures how line-like a blob is regardless of orientation (a 45° tape is
+    just as elongated as a vertical one). Grass/clutter blobs are roundish
+    (elongation ~1) and get rejected; a continuous straight-or-angled tape
+    segment is long and thin (elongation high)."""
     area = cv2.contourArea(cnt)
     if area < min_area:
         return False
@@ -131,7 +137,13 @@ def is_tape_like(cnt, min_area, min_solidity, min_width_px):
     if hull_area == 0 or area / hull_area < min_solidity:
         return False
     _, _, w, _ = cv2.boundingRect(cnt)
-    return w >= min_width_px
+    if w < min_width_px:
+        return False
+    (_, _), (rw, rh), _ = cv2.minAreaRect(cnt)
+    short = min(rw, rh)
+    if short < 1.0:
+        return False
+    return (max(rw, rh) / short) >= min_elongation
 
 
 def main():
@@ -147,6 +159,7 @@ def main():
     min_contour_area = int(p.get("min_contour_area", 500))
     min_solidity     = float(p.get("min_solidity", 0.60))
     min_tape_width   = int(p.get("min_tape_width_px", 15))
+    min_elongation   = float(p.get("min_elongation", 2.5))
     min_total_mask       = int(p.get("min_total_mask_area", 3000))
     max_fit_residual     = float(p.get("max_fit_residual_px", 30.0))
     lookahead_row_frac   = float(p.get("lookahead_row_fraction", 0.0))
@@ -158,7 +171,7 @@ def main():
     print(f"      lab_a=[{lab_a_min},{lab_a_max}]  lab_b=[{lab_b_min},{lab_b_max}]")
     print(f"      clahe_clip={clahe_clip}  clahe_tile={clahe_tile}")
     print(f"      roi={roi_pct}  strips={num_strips}  min_area={min_contour_area}")
-    print(f"      min_solidity={min_solidity}  min_tape_width={min_tape_width}px")
+    print(f"      min_solidity={min_solidity}  min_tape_width={min_tape_width}px  min_elongation={min_elongation}")
     print(f"      min_total_mask={min_total_mask}  max_residual={max_fit_residual}px")
     print(f"      lookahead_row_frac={lookahead_row_frac}  morph_kernel={morph_k}")
     print(f"      ema_alpha={ema_alpha}  patience={lost_patience}")
@@ -185,6 +198,7 @@ def main():
     cv2.createTrackbar("min_area",       CTRL_WIN, min_contour_area,          5000, nothing)
     cv2.createTrackbar("solidity x100",  CTRL_WIN, int(min_solidity * 100),    100, nothing)
     cv2.createTrackbar("min_width_px",   CTRL_WIN, min_tape_width,             200, nothing)
+    cv2.createTrackbar("elongation x10", CTRL_WIN, int(min_elongation * 10),   100, nothing)
     cv2.createTrackbar("min_total_mask", CTRL_WIN, min_total_mask,           30000, nothing)
     cv2.createTrackbar("residual_px",    CTRL_WIN, int(max_fit_residual),      100, nothing)
     cv2.createTrackbar("lookahead x100", CTRL_WIN, int(lookahead_row_frac * 100), 100, nothing)
@@ -217,6 +231,7 @@ def main():
         min_area_t       = cv2.getTrackbarPos("min_area",       CTRL_WIN)
         solidity_t       = cv2.getTrackbarPos("solidity x100",  CTRL_WIN) / 100.0
         min_width_t      = cv2.getTrackbarPos("min_width_px",   CTRL_WIN)
+        elongation_t     = cv2.getTrackbarPos("elongation x10", CTRL_WIN) / 10.0
         min_total_mask_t = cv2.getTrackbarPos("min_total_mask", CTRL_WIN)
         max_residual_t   = float(cv2.getTrackbarPos("residual_px", CTRL_WIN))
         lookahead_frac_t = cv2.getTrackbarPos("lookahead x100", CTRL_WIN) / 100.0
@@ -263,7 +278,7 @@ def main():
                 tape_like = []
                 rejected  = []
                 for c in contours:
-                    (tape_like if is_tape_like(c, min_area_t, solidity_t, min_width_t) else rejected).append(c)
+                    (tape_like if is_tape_like(c, min_area_t, solidity_t, min_width_t, elongation_t) else rejected).append(c)
                 for c in rejected:
                     cv2.drawContours(roi[y0:y1], [c], -1, (0, 0, 255), 1)
                 # Keep accepted blobs in the clean mask.
@@ -346,7 +361,7 @@ def main():
             cv2.putText(frame, txt, (8, y), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 3)
             cv2.putText(frame, txt, (8, y), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 1)
 
-        param_str = f"A=[{a_min},{a_max}]  B=[{b_min},{b_max}]  CLAHE={clip:.1f}/{tile}"
+        param_str = f"A=[{a_min},{a_max}]  B=[{b_min},{b_max}]  CLAHE={clip:.1f}/{tile}  elong>={elongation_t:.1f}"
         cv2.putText(frame, param_str, (8, h - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 0), 3)
         cv2.putText(frame, param_str, (8, h - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 0), 1)
 
@@ -378,6 +393,7 @@ def main():
                 ("min_contour_area",    str(min_area_t)),
                 ("min_solidity",        f"{solidity_t:.2f}"),
                 ("min_tape_width_px",   str(min_width_t)),
+                ("min_elongation",         f"{elongation_t:.1f}"),
                 ("min_total_mask_area",    str(min_total_mask_t)),
                 ("max_fit_residual_px",    f"{max_residual_t:.1f}"),
                 ("lookahead_row_fraction", f"{lookahead_frac_t:.2f}"),
