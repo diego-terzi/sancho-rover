@@ -247,6 +247,10 @@ def main():
         mask_area   = int(cv2.countNonZero(mask))
         gate_passed = mask_area >= min_total_mask_t
 
+        # Clean mask shown in MASK_WIN: only the blobs that pass is_tape_like
+        # (the green ones). Rejected blobs (red border in the ROI) are dropped.
+        mask_clean = np.zeros_like(mask)
+
         strip_h      = roi_h // num_strips
         strip_points = []
         if gate_passed:
@@ -262,6 +266,9 @@ def main():
                     (tape_like if is_tape_like(c, min_area_t, solidity_t, min_width_t) else rejected).append(c)
                 for c in rejected:
                     cv2.drawContours(roi[y0:y1], [c], -1, (0, 0, 255), 1)
+                # Keep accepted blobs in the clean mask.
+                for c in tape_like:
+                    cv2.drawContours(mask_clean[y0:y1, :], [c], -1, 255, -1)
                 if not tape_like:
                     continue
                 largest = max(tape_like, key=cv2.contourArea)
@@ -349,7 +356,7 @@ def main():
                           (0, 255, 255), 2)
 
         cv2.imshow(VIZ_WIN, frame)
-        cv2.imshow(MASK_WIN, mask)
+        cv2.imshow(MASK_WIN, mask_clean)
 
         if not cb_registered:
             cv2.waitKey(1)
