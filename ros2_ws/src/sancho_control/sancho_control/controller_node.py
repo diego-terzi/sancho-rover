@@ -8,10 +8,13 @@ State machine:
 
 Control law on FOLLOWING:
     angular.z = -(Kp*err + Ki*∫err + Kd*ḋerr)
-    linear.x  = max_speed * (1 - (1 - slow_speed_ratio) * |lookahead_err|)
-              # lookahead_err = trail position at a row higher in the ROI,
-              # i.e. "where the trail is going", from /trail_lookahead_error.
-              # 0 → full speed, ±1 → slow_speed_ratio * max_speed.
+    linear.x  = max_speed * (1 - (1 - slow_speed_ratio) * curve_intensity)
+              # curve_intensity = min(1, (divergence_gain * |lookahead_err - err|)^2)
+              # divergence = how much the trail *ahead* (lookahead_err, from
+              # /trail_lookahead_error) differs from where it is *now* (err).
+              # Straight trail → divergence ~0 → full speed; a curve coming up
+              # makes the two diverge → speed drops (quadratically, so it stays
+              # gentle for small offsets then falls off fast).
 """
 
 import math
@@ -39,6 +42,7 @@ class ControllerNode(Node):
         self.ki                  = float(self.declare_parameter('pid_ki', 0.0).value)
         self.kd                  = float(self.declare_parameter('pid_kd', 0.1).value)
         self.slow_speed_ratio    = float(self.declare_parameter('slow_speed_ratio', 0.5).value)
+        self.divergence_gain     = float(self.declare_parameter('divergence_gain', 2.5).value)
         self.trail_lost_timeout  = float(self.declare_parameter('trail_lost_timeout', 2.0).value)
         self.obstacle_distance_m = float(self.declare_parameter('obstacle_distance_m', 0.3).value)
         self.control_rate_hz     = float(self.declare_parameter('control_rate_hz', 20.0).value)
@@ -125,11 +129,14 @@ class ControllerNode(Node):
             angular_z = -angular_correction
             angular_z = max(-self.max_angular_z, min(self.max_angular_z, angular_z))
 
-            # Speed reduced proportionally to how much the trail curves *ahead*
-            # of the rover. lookahead_err = 0 → full max_speed; lookahead_err = ±1
-            # → max_speed * slow_speed_ratio. Linear ramp in between. Steering is
-            # unaffected — only the longitudinal velocity is modulated.
-            curve_intensity = min(1.0, abs(self.last_lookahead_err))
+            # Speed reduced by how much the trail *ahead* diverges from where it
+            # is *now*: divergence = |lookahead_err - error|. Straight trail →
+            # divergence ~0 → full max_speed; a curve coming up makes them diverge.
+            # The divergence_gain amplifies it (the lookahead rarely reaches ±1
+            # on its own) and the square keeps the cut gentle for small offsets
+            # then steep beyond. Steering is unaffected — only longitudinal speed.
+            divergence = abs(self.last_lookahead_err - error)
+            curve_intensity = min(1.0, (self.divergence_gain * divergence) ** 2)
             speed = self.max_speed * (1.0 - (1.0 - self.slow_speed_ratio) * curve_intensity)
 
             cmd.linear.x  = speed
