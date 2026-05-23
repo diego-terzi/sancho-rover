@@ -17,6 +17,8 @@ Autore: Visual Tutor Refactoring
 
 import threading
 import time
+import subprocess
+import re
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from io import BytesIO
 
@@ -183,6 +185,55 @@ class MjpegServer:
 
     def stop(self):
         self._server.shutdown()
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  TUNNEL CLOUDFLARE (opzionale, avviato automaticamente se cloudflared è installato)
+# ──────────────────────────────────────────────────────────────────────────────
+
+class CloudflareTunnel:
+    """
+    Avvia cloudflared in background e cattura l'URL pubblico dal suo output.
+    Se cloudflared non è installato, fallisce silenziosamente senza bloccare il nodo.
+    """
+
+    def __init__(self, port: int, on_url=None):
+        """
+        port   : porta locale da esporre
+        on_url : callback chiamata con l'URL pubblico appena disponibile
+        """
+        self._port    = port
+        self._on_url  = on_url
+        self._process = None
+        self._thread  = None
+
+    def start(self):
+        try:
+            self._process = subprocess.Popen(
+                ['cloudflared', 'tunnel', '--url', f'http://localhost:{self._port}'],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,   # cloudflared scrive su stderr
+                text=True
+            )
+            self._thread = threading.Thread(target=self._watch_output, daemon=True)
+            self._thread.start()
+        except FileNotFoundError:
+            # cloudflared non installato: ignora silenziosamente
+            pass
+
+    def _watch_output(self):
+        """Legge l'output di cloudflared riga per riga cercando l'URL pubblico."""
+        url_pattern = re.compile(r'https://[a-z0-9\-]+\.trycloudflare\.com')
+        for line in self._process.stdout:
+            match = url_pattern.search(line)
+            if match and self._on_url:
+                self._on_url(match.group(0))
+                # Una volta trovato l'URL non serve continuare a parsare
+                break
+
+    def stop(self):
+        if self._process:
+            self._process.terminate()
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -359,6 +410,16 @@ class CameraNode(Node):
             f'(debug: /debug | maschera: /mask)'
         )
 
+        # ── Tunnel Cloudflare automatico (se cloudflared è installato) ────
+        def _log_tunnel_url(url: str):
+            self.get_logger().info(
+                f'\n  ╔══════════════════════════════════════════════╗\n'
+                f'  ║  LINK PUBBLICO CAMERA → {url}\n'
+                f'  ╚══════════════════════════════════════════════╝'
+            )
+        self._tunnel = CloudflareTunnel(port=web_port, on_url=_log_tunnel_url)
+        self._tunnel.start()
+
         # ── CvBridge e Publishers ROS2 ────────────────────────────────────
         self.bridge         = CvBridge()
         self.error_pub      = self.create_publisher(Float32, 'trail_error', 1)
@@ -467,6 +528,7 @@ class CameraNode(Node):
             self.get_logger().error(f"Errore durante lo streaming ROS2 delle immagini: {e}")
 
     def destroy_node(self):
+        self._tunnel.stop()
         self._mjpeg_server.stop()
         self.cap.release()
         super().destroy_node()
