@@ -32,8 +32,9 @@ controller_node:
     pid_kp: 1.5                # PID on lateral trail error — alzato per più autorità di sterzo a velocità alta
     pid_ki: 0.0
     pid_kd: 0.1                # mild damping at higher speeds
-    slow_speed_ratio: 0.25     # frazione di v_motor_max a curve_intensity=1 (curva stretta, qui o davanti); rampa lineare da 1.0 a curve_intensity=0
-    curve_sensitivity: 1.0     # moltiplica max(|err|, |lookahead|) prima del clamp a 1.0. 1.0 = rampa lineare piena su tutto il range, niente saturazione precoce = transizione fluida.
+    slow_speed_ratio: 0.6      # frazione di v_motor_max a curve_intensity=1; ALZATO da 0.25 -> rallenta meno in curva. Più alto = più veloce in curva (rischio sbandata su curve strette).
+    curve_sensitivity: 1.0     # moltiplica l'intensità (rifasata oltre la deadzone) prima del clamp a 1.0
+    curve_deadzone: 0.2        # |err|/|lookahead| sotto questo = rettilineo, ZERO rallentamento (velocità piena vera, niente jitter che lima la punta). Sopra, la rampa riparte da [deadzone,1].
     trail_lost_timeout: 2.0    # seconds of NaN/silence before TRAIL_LOST
     obstacle_distance_m: 0.5   # meters; below this => OBSTACLE_STOP (needs sensor_node)
     control_rate_hz: 20.0      # Twist publish rate; also the PID dt

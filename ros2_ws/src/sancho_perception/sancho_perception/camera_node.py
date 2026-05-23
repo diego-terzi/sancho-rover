@@ -1,31 +1,20 @@
 """
-Camera node: detect a tape trail by LAB colour + CLAHE and publish two topics:
+Camera Node - Versione Aggiornata e Rifattorizzata
+--------------------------------------------------
+Rileva la linea di nastro tramite colore LAB + CLAHE e pubblica:
+  - /trail_error            (Float32): Errore laterale per il PID
+  - /trail_lookahead_error  (Float32): Errore anticipato per la velocità
+  - /camera/mask_view       (Image): Streaming della maschera binaria pulita
+  - /camera/debug_view      (Image): Streaming video con overlay grafico (linee, punti)
 
-  /trail_error            Float32 in [-1, 1]  — lateral error at the bottom of ROI
-                          (drives PID steering)
-  /trail_lookahead_error  Float32 in [-1, 1]  — lateral error projected further ahead
-                          (drives speed reduction before curves)
-
-Two pure functions do the work; CameraNode wires them to the camera.
-
-  lab_mask(roi_bgr, ...) -> uint8 binary mask
-      BGR -> LAB, CLAHE on L channel, inRange on A+B, morphology cleanup.
-      Returns the *raw* colour mask (zeroed if the whole-ROI mask is too small).
-      Blob quality filtering happens per-strip in mask_to_error, NOT here — this
-      matches tools/visualize_camera_pipeline.py so what you tune is what runs.
-
-  mask_to_error(mask, ...) -> (error, lookahead_err)
-      Splits the mask into horizontal strips. In each strip keeps the largest
-      *tape-like* blob (area + solidity + width + elongation gate), takes its
-      centroid, fits a line through >= 2 centroids, projects it to:
-        - bottom of ROI  -> error
-        - lookahead_row_fraction from top -> lookahead_err (clamped to topmost centroid)
-      Returns (None, None) if fit is rejected or too few strips.
+Autore: Visual Tutor Refactoring
 """
 
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Float32
+from sensor_msgs.msg import Image
+from cv_bridge import CvBridge
 import cv2
 import numpy as np
 
@@ -34,104 +23,140 @@ def lab_mask(roi_bgr, *,
              lab_lower, lab_upper,
              clahe_clip, clahe_tile,
              morph_k,
-             min_total_mask_area):
-    """LAB+CLAHE colour mask + morphology. Raw binary mask, no per-blob filter.
-
-    Returns all zeros if the total mask area is below min_total_mask_area
-    (scene treated as empty). Blob quality filtering is done per-strip in
-    mask_to_error, mirroring the visualizer."""
-    lab              = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2LAB)
+             min_total_mask_area,
+             min_contour_area,
+             min_solidity,
+             min_tape_width_px,
+             min_elongation):
+    """
+    1. FUNZIONE DI VISIONE: Converte in LAB, applica CLAHE, esegue la soglia colore
+    ed esclude i blob di rumore (non conformi al nastro) direttamente in questa fase.
+    Restituisce una maschera binaria già perfettamente pulita.
+    """
+    # Spazio colore e livellamento illuminazione (CLAHE)
+    lab = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2LAB)
     l_ch, a_ch, b_ch = cv2.split(lab)
-    clahe            = cv2.createCLAHE(clipLimit=clahe_clip,
-                                       tileGridSize=(clahe_tile, clahe_tile))
-    l_eq             = clahe.apply(l_ch)
-    lab_eq           = cv2.merge([l_eq, a_ch, b_ch])
+    clahe = cv2.createCLAHE(clipLimit=clahe_clip, tileGridSize=(clahe_tile, clahe_tile))
+    l_eq = clahe.apply(l_ch)
+    lab_eq = cv2.merge([l_eq, a_ch, b_ch])
 
-    mask   = cv2.inRange(lab_eq, lab_lower, lab_upper)
+    # Soglia colore iniziale e pulizia morfologica rapida
+    raw_mask = cv2.inRange(lab_eq, lab_lower, lab_upper)
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (morph_k, morph_k))
-    mask   = cv2.morphologyEx(mask, cv2.MORPH_OPEN,  kernel)
-    mask   = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+    raw_mask = cv2.morphologyEx(raw_mask, cv2.MORPH_OPEN, kernel)
+    raw_mask = cv2.morphologyEx(raw_mask, cv2.MORPH_CLOSE, kernel)
 
-    if cv2.countNonZero(mask) < min_total_mask_area:
-        return np.zeros_like(mask)
-    return mask
+    # Controllo di sicurezza sull'area totale della maschera
+    if cv2.countNonZero(raw_mask) < min_total_mask_area:
+        return np.zeros_like(raw_mask)
+
+    # Filtraggio geometrico dei contorni (Sostituisce is_tape_like in modo piatto)
+    clean_mask = np.zeros_like(raw_mask)
+    contours, _ = cv2.findContours(raw_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    for cnt in contours:
+        # Controllo Area minima
+        area = cv2.contourArea(cnt)
+        if area < min_contour_area:
+            continue
+            
+        # Controllo Solidità (rapporto area contorno / convex hull)
+        hull_area = cv2.contourArea(cv2.convexHull(cnt))
+        if hull_area == 0 or (area / hull_area) < min_solidity:
+            continue
+            
+        # Controllo Larghezza minima del Bounding Box dritto
+        _, _, w, _ = cv2.boundingRect(cnt)
+        if w < min_tape_width_px:
+            continue
+            
+        # Controllo Elongazione (Rapporto lati del rettangolo ruotato minimo)
+        (_, _), (rw, rh), _ = cv2.minAreaRect(cnt)
+        short_side = min(rw, rh)
+        if short_side < 1.0:
+            continue
+        if (max(rw, rh) / short_side) < min_elongation:
+            continue
+            
+        # Se supera tutti i cancelli di qualità, il blob viene approvato e disegnato
+        cv2.drawContours(clean_mask, [cnt], -1, 255, -1)
+
+    return clean_mask
 
 
-def is_tape_like(cnt, *, min_area, min_solidity, min_width_px, min_elongation):
-    """Per-blob gate: area + solidity + bounding-rect width + elongation.
-
-    Elongation = long_side / short_side of the *rotated* min-area rect, so it
-    measures how line-like a blob is regardless of orientation (a 45° tape is
-    just as elongated as a vertical one). Roundish grass/clutter blobs
-    (elongation ~1) are rejected; a continuous straight-or-angled tape segment
-    is long and thin (elongation high)."""
-    area = cv2.contourArea(cnt)
-    if area < min_area:
-        return False
-    hull_area = cv2.contourArea(cv2.convexHull(cnt))
-    if hull_area == 0 or area / hull_area < min_solidity:
-        return False
-    _, _, w, _ = cv2.boundingRect(cnt)
-    if w < min_width_px:
-        return False
-    (_, _), (rw, rh), _ = cv2.minAreaRect(cnt)
-    short = min(rw, rh)
-    if short < 1.0:
-        return False
-    return (max(rw, rh) / short) >= min_elongation
-
-
-def mask_to_error(mask, *,
+def mask_to_error(clean_mask, *,
                   num_strips,
-                  min_contour_area, min_solidity, min_tape_width_px, min_elongation,
                   max_fit_residual_px,
-                  lookahead_row_fraction):
-    """Reduce a binary mask to (error, lookahead_err); both in [-1,1] or both None.
-
-    Per strip, keep the largest tape-like blob (area+solidity+width+elongation),
-    take its centroid, fit a line through >= 2 centroids."""
-    h, w    = mask.shape
-    half_w  = w / 2.0
+                  lookahead_row_fraction,
+                  debug_roi=None):
+    """
+    2. FUNZIONE GEOMETRICA: Divide la maschera pulita in strisce orizzontali,
+    trova il baricentro del frammento più grande per striscia ed esegue il fit lineare.
+    Se viene passato 'debug_roi', vi disegna sopra i risultati per lo streaming video.
+    """
+    h, w = clean_mask.shape
+    half_w = w / 2.0
     strip_h = h // num_strips
     centroids = []
 
     for i in range(num_strips):
         y0 = h - (i + 1) * strip_h
-        y1 = h - i       * strip_h
-        contours, _ = cv2.findContours(
-            mask[y0:y1, :], cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
-        )
-        tape_like = [
-            c for c in contours
-            if is_tape_like(c, min_area=min_contour_area, min_solidity=min_solidity,
-                            min_width_px=min_tape_width_px, min_elongation=min_elongation)
-        ]
-        if not tape_like:
+        y1 = h - i * strip_h
+        
+        # Estrazione dei contorni nella singola striscia
+        strip_fragment = clean_mask[y0:y1, :]
+        contours, _ = cv2.findContours(strip_fragment, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        if not contours:
             continue
-        largest = max(tape_like, key=cv2.contourArea)
+            
+        # Essendo la maschera già pulita, prendiamo semplicemente il pezzo più grande presente
+        largest = max(contours, key=cv2.contourArea)
         M = cv2.moments(largest)
         if M['m00'] == 0:
             continue
-        centroids.append((M['m10'] / M['m00'], y0 + M['m01'] / M['m00']))
+            
+        cx = M['m10'] / M['m00']
+        cy = M['m01'] / M['m00']
+        centroids.append((cx, y0 + cy))
+
+        # Disegno di debug facoltativo (Contorni verdi e pallini rossi sui baricentri delle strisce)
+        if debug_roi is not None:
+            cv2.drawContours(debug_roi[y0:y1], [largest], -1, (0, 255, 0), 2)
+            cv2.circle(debug_roi[y0:y1], (int(cx), int(cy)), 6, (0, 0, 255), -1)
+
+    # Disegno delle linee di divisione delle strisce sul video di debug
+    if debug_roi is not None:
+        for i in range(1, num_strips):
+            y_line = h - i * strip_h
+            cv2.line(debug_roi, (0, y_line), (w, y_line), (100, 100, 100), 1)
 
     if len(centroids) < 2:
         return None, None
 
-    pts      = np.array(centroids)
-    a, b     = np.polyfit(pts[:, 1], pts[:, 0], 1)
+    # Approssimazione lineare (Linear Fitting)
+    pts = np.array(centroids)
+    a, b = np.polyfit(pts[:, 1], pts[:, 0], 1)
+    
+    # Controllo dei residui per rigettare traiettorie incoerenti
     residual = float(np.mean(np.abs(a * pts[:, 1] + b - pts[:, 0])))
     if residual > max_fit_residual_px:
         return None, None
 
+    # Calcolo Errore alla base della ROI
     x_bottom = a * h + b
-    error    = float(np.clip((x_bottom - half_w) / half_w, -1.0, 1.0))
+    error = float(np.clip((x_bottom - half_w) / half_w, -1.0, 1.0))
 
-    # Project line further ahead; clamped to topmost detected centroid
-    # so we never extrapolate beyond what was actually seen.
+    # Calcolo Errore Lookahead (Proiettato in avanti)
     top_detected_y = float(pts[:, 1].min())
-    lookahead_y    = max(h * lookahead_row_fraction, top_detected_y)
-    x_lookahead    = a * lookahead_y + b
-    lookahead_err  = float(np.clip((x_lookahead - half_w) / half_w, -1.0, 1.0))
+    lookahead_y = max(h * lookahead_row_fraction, top_detected_y)
+    x_lookahead = a * lookahead_y + b
+    lookahead_err = float(np.clip((x_lookahead - half_w) / half_w, -1.0, 1.0))
+
+    # Disegno della retta di regressione (Gialla) e del punto di lookahead (Arancione)
+    if debug_roi is not None:
+        cv2.line(debug_roi, (int(b), 0), (int(x_bottom), h), (0, 255, 255), 2)
+        cv2.circle(debug_roi, (int(x_lookahead), int(lookahead_y)), 8, (0, 165, 255), -1)
 
     return error, lookahead_err
 
@@ -140,11 +165,11 @@ class CameraNode(Node):
     def __init__(self):
         super().__init__('camera_node')
 
-        # ROI / frame
+        # Parametri ROI e Frequenza
         self.roi_height_percent = float(self.declare_parameter('roi_height_percent', 0.70).value)
-        self.publish_rate_hz    = float(self.declare_parameter('publish_rate_hz',   30.0).value)
+        self.publish_rate_hz    = float(self.declare_parameter('publish_rate_hz', 30.0).value)
 
-        # LAB colour params
+        # Parametri Spazio Colore LAB
         lab_a_min = int(self.declare_parameter('lab_a_min', 100).value)
         lab_a_max = int(self.declare_parameter('lab_a_max', 145).value)
         lab_b_min = int(self.declare_parameter('lab_b_min',  60).value)
@@ -152,90 +177,108 @@ class CameraNode(Node):
         self.lab_lower = np.array([0,   lab_a_min, lab_b_min], dtype=np.uint8)
         self.lab_upper = np.array([255, lab_a_max, lab_b_max], dtype=np.uint8)
 
-        # CLAHE + morphology
-        self.clahe_clip  = float(self.declare_parameter('clahe_clip',      2.0).value)
-        self.clahe_tile  = int(  self.declare_parameter('clahe_tile',        8).value)
-        self.morph_k     = int(  self.declare_parameter('morph_kernel_size', 5).value)
+        # Parametri Filtri Immagine
+        self.clahe_clip  = float(self.declare_parameter('clahe_clip', 2.0).value)
+        self.clahe_tile  = int(self.declare_parameter('clahe_tile', 8).value)
+        self.morph_k     = int(self.declare_parameter('morph_kernel_size', 5).value)
 
-        # Per-strip blob quality gate
-        self.min_contour_area    = int(  self.declare_parameter('min_contour_area',      500).value)
-        self.min_solidity        = float(self.declare_parameter('min_solidity',         0.60).value)
-        self.min_tape_width_px   = int(  self.declare_parameter('min_tape_width_px',      15).value)
-        self.min_elongation      = float(self.declare_parameter('min_elongation',        2.5).value)
-        self.min_total_mask_area = int(  self.declare_parameter('min_total_mask_area', 3000).value)
+        # Parametri di Qualità dei Blob
+        self.min_contour_area    = int(self.declare_parameter('min_contour_area', 500).value)
+        self.min_solidity        = float(self.declare_parameter('min_solidity', 0.60).value)
+        self.min_tape_width_px   = int(self.declare_parameter('min_tape_width_px', 15).value)
+        self.min_elongation      = float(self.declare_parameter('min_elongation', 2.5).value)
+        self.min_total_mask_area = int(self.declare_parameter('min_total_mask_area', 3000).value)
 
-        # Strip → fit params
-        self.num_strips             = int(  self.declare_parameter('num_roi_strips',            3).value)
-        self.max_fit_residual_px    = float(self.declare_parameter('max_fit_residual_px',    30.0).value)
-        self.lookahead_row_fraction = float(self.declare_parameter('lookahead_row_fraction',  0.0).value)
+        # Parametri Fitting Linea
+        self.num_strips             = int(self.declare_parameter('num_roi_strips', 3).value)
+        self.max_fit_residual_px    = float(self.declare_parameter('max_fit_residual_px', 30.0).value)
+        self.lookahead_row_fraction = float(self.declare_parameter('lookahead_row_fraction', 0.0).value)
 
-        # Smoothing / debounce
-        self.ema_alpha           = float(self.declare_parameter('ema_alpha',           0.3).value)
-        self.lost_trail_patience = int(  self.declare_parameter('lost_trail_patience',   5).value)
+        # Parametri di Smoothing EMA e Debounce
+        self.ema_alpha           = float(self.declare_parameter('ema_alpha', 0.3).value)
+        self.lost_trail_patience = int(self.declare_parameter('lost_trail_patience', 5).value)
 
         self.smoothed_error         = 0.0
         self.smoothed_lookahead_err = 0.0
         self.consecutive_lost       = 0
 
-        self.error_pub     = self.create_publisher(Float32, 'trail_error',           1)
-        self.lookahead_pub = self.create_publisher(Float32, 'trail_lookahead_error', 1)
+        # Inizializzazione CvBridge per conversione immagini ROS2 <-> OpenCV
+        self.bridge = CvBridge()
 
+        # Inizializzazione Publishers (Numerici + Immagini)
+        self.error_pub     = self.create_publisher(Float32, 'trail_error', 1)
+        self.lookahead_pub = self.create_publisher(Float32, 'trail_lookahead_error', 1)
+        self.mask_view_pub = self.create_publisher(Image, 'camera/mask_view', 1)
+        self.debug_view_pub = self.create_publisher(Image, 'camera/debug_view', 1)
+
+        # Configurazione Videocamera
         cam_idx = int(self.declare_parameter('camera_index', 0).value)
         self.cap = cv2.VideoCapture(cam_idx)
-        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH,
-                     int(self.declare_parameter('frame_width',  640).value))
-        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT,
-                     int(self.declare_parameter('frame_height', 480).value))
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, int(self.declare_parameter('frame_width', 640).value))
+        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, int(self.declare_parameter('frame_height', 480).value))
+        
         if not self.cap.isOpened():
-            self.get_logger().error('Webcam not accessible')
+            self.get_logger().error('Impossibile accedere alla webcam!')
             raise RuntimeError('Camera open failed')
 
+        # Avvio Timer Principale della Pipeline
         self.timer = self.create_timer(1.0 / self.publish_rate_hz, self.process_frame)
-        self.get_logger().info('Camera node started (LAB+CLAHE detector with lookahead)')
+        self.get_logger().info('CameraNode avviato con successo [Pipeline Pulita + Streaming Live Attivo]')
 
     def process_frame(self):
         ret, frame = self.cap.read()
         if not ret:
-            self.get_logger().warn('Frame not read')
+            self.get_logger().warn('Frame non letto correttamente dalla sorgente video')
             return
 
-        h   = frame.shape[0]
-        roi = frame[int(h * (1.0 - self.roi_height_percent)):, :]
+        # Estrazione della Region of Interest (ROI)
+        h, w = frame.shape[:2]
+        roi_y0 = int(h * (1.0 - self.roi_height_percent))
+        roi = frame[roi_y0:, :].copy()
 
-        mask = lab_mask(
+        # 1. Generazione della maschera colore già filtrata dai blob estranei
+        clean_mask = lab_mask(
             roi,
-            lab_lower          = self.lab_lower,
-            lab_upper          = self.lab_upper,
-            clahe_clip         = self.clahe_clip,
-            clahe_tile         = self.clahe_tile,
-            morph_k            = self.morph_k,
-            min_total_mask_area= self.min_total_mask_area,
+            lab_lower           = self.lab_lower,
+            lab_upper           = self.lab_upper,
+            clahe_clip          = self.clahe_clip,
+            clahe_tile          = self.clahe_tile,
+            morph_k             = self.morph_k,
+            min_total_mask_area = self.min_total_mask_area,
+            min_contour_area    = self.min_contour_area,
+            min_solidity        = self.min_solidity,
+            min_tape_width_px   = self.min_tape_width_px,
+            min_elongation      = self.min_elongation
         )
 
+        # Creiamo un'area di disegno per l'overlay grafico sul frame completo
+        # Passiamo la sezione ROI a `mask_to_error` in modo che possa disegnarci sopra
+        debug_frame = frame.copy()
+        debug_roi = debug_frame[roi_y0:, :]
+
+        # Disegniamo il rettangolo arancione della ROI globale per feedback visivo
+        cv2.rectangle(debug_frame, (0, roi_y0), (w - 1, h - 1), (0, 165, 255), 2)
+        cv2.line(debug_frame, (w // 2, 0), (w // 2, h - 1), (255, 255, 255), 1)
+
+        # 2. Calcolo geometrico degli errori basandosi sulla maschera pulita
         error_raw, lookahead_err_raw = mask_to_error(
-            mask,
+            clean_mask,
             num_strips             = self.num_strips,
-            min_contour_area       = self.min_contour_area,
-            min_solidity           = self.min_solidity,
-            min_tape_width_px      = self.min_tape_width_px,
-            min_elongation         = self.min_elongation,
             max_fit_residual_px    = self.max_fit_residual_px,
             lookahead_row_fraction = self.lookahead_row_fraction,
+            debug_roi              = debug_roi  # Passato per abilitare i disegni live
         )
 
+        # Logica di Smoothing (EMA) e contatore Debounce per tracciato perso
         if error_raw is not None:
             if self.consecutive_lost > self.lost_trail_patience:
                 self.smoothed_error         = error_raw
                 self.smoothed_lookahead_err = lookahead_err_raw
             else:
-                self.smoothed_error = (
-                    self.ema_alpha * error_raw
-                    + (1.0 - self.ema_alpha) * self.smoothed_error
-                )
-                self.smoothed_lookahead_err = (
-                    self.ema_alpha * lookahead_err_raw
-                    + (1.0 - self.ema_alpha) * self.smoothed_lookahead_err
-                )
+                self.smoothed_error = (self.ema_alpha * error_raw + 
+                                       (1.0 - self.ema_alpha) * self.smoothed_error)
+                self.smoothed_lookahead_err = (self.ema_alpha * lookahead_err_raw + 
+                                               (1.0 - self.ema_alpha) * self.smoothed_lookahead_err)
             self.consecutive_lost = 0
             error         = self.smoothed_error
             lookahead_err = self.smoothed_lookahead_err
@@ -248,10 +291,23 @@ class CameraNode(Node):
                 error         = self.smoothed_error
                 lookahead_err = self.smoothed_lookahead_err
 
-        err_msg      = Float32(); err_msg.data  = error
-        look_msg     = Float32(); look_msg.data = lookahead_err
+        # --- PUBBLICAZIONE TOPIC NUMERICI (ROS2) ---
+        err_msg = Float32();  err_msg.data = error
+        look_msg = Float32(); look_msg.data = lookahead_err
         self.error_pub.publish(err_msg)
         self.lookahead_pub.publish(look_msg)
+
+        # --- PUBBLICAZIONE LIVE VIDEO STREAMING (ROS2) ---
+        try:
+            # Pubblica la maschera binaria (Mono a 8-bit)
+            mask_msg = self.bridge.cv2_to_imgmsg(clean_mask, encoding="mono8")
+            self.mask_view_pub.publish(mask_msg)
+            
+            # Pubblica il frame originale a colori (BGR a 8-bit) con la grafica sovraimpressa
+            debug_msg = self.bridge.cv2_to_imgmsg(debug_frame, encoding="bgr8")
+            self.debug_view_pub.publish(debug_msg)
+        except Exception as e:
+            self.get_logger().error(f"Errore durante lo streaming delle immagini: {e}")
 
     def destroy_node(self):
         self.cap.release()
