@@ -14,6 +14,10 @@ Usage:
     python3 tools/visualize_camera_pipeline.py [camera_index]   (default: 0)
 
 Keys:
+    drag     sample colour under the rectangle -> sets A/B trackbars
+    u        toggle UNION sampling: each drag *widens* the A/B range instead
+             of replacing it. Sample tape in sun, then in shade -> range
+             covers both lighting conditions.
     s        save current trackbar values to sancho_params.yaml
     q / Esc  quit
 """
@@ -39,14 +43,15 @@ YAML_PATH = os.path.join(
 CAM_INDEX = int(sys.argv[1]) if len(sys.argv) > 1 else 0
 
 CTRL_WIN = "controls  [s]=save  [q]=quit"
-VIZ_WIN  = "camera_node pipeline  [drag]=sample colour  [s]=save  [q]=quit"
+VIZ_WIN  = "camera_node pipeline  [drag]=sample  [u]=union  [s]=save  [q]=quit"
 MASK_WIN = "mask"
 
 # Margins added around the percentile-sampled LAB range.
 MARGIN_A = 10
 MARGIN_B = 15
 
-_sel = {'drawing': False, 'ix': 0, 'iy': 0, 'ex': 0, 'ey': 0, 'frame': None}
+_sel = {'drawing': False, 'ix': 0, 'iy': 0, 'ex': 0, 'ey': 0, 'frame': None,
+        'union': False}
 
 
 def _sample_lab(frame, x0, y0, x1, y1):
@@ -88,11 +93,18 @@ def _mouse_cb(event, x, y, flags, param):
         if result is None:
             return
         a_lo, a_hi, b_lo, b_hi = result
+        if s['union']:
+            # Expand the existing range to also cover this sample (sun + shade).
+            a_lo = min(a_lo, cv2.getTrackbarPos("A min", ctrl_win))
+            a_hi = max(a_hi, cv2.getTrackbarPos("A max", ctrl_win))
+            b_lo = min(b_lo, cv2.getTrackbarPos("B min", ctrl_win))
+            b_hi = max(b_hi, cv2.getTrackbarPos("B max", ctrl_win))
         cv2.setTrackbarPos("A min", ctrl_win, a_lo)
         cv2.setTrackbarPos("A max", ctrl_win, a_hi)
         cv2.setTrackbarPos("B min", ctrl_win, b_lo)
         cv2.setTrackbarPos("B max", ctrl_win, b_hi)
-        print(f"[viz] sampled LAB → A=[{a_lo},{a_hi}]  B=[{b_lo},{b_hi}]")
+        mode = "UNION" if s['union'] else "replace"
+        print(f"[viz] sampled LAB ({mode}) → A=[{a_lo},{a_hi}]  B=[{b_lo},{b_hi}]")
 
 
 def load_params(path):
@@ -175,7 +187,7 @@ def main():
     print(f"      min_total_mask={min_total_mask}  max_residual={max_fit_residual}px")
     print(f"      lookahead_row_frac={lookahead_row_frac}  morph_kernel={morph_k}")
     print(f"      ema_alpha={ema_alpha}  patience={lost_patience}")
-    print(f"[viz] press 's' to save, 'q'/Esc to quit")
+    print(f"[viz] drag=sample  u=union(sole+ombra)  s=save  q/Esc=quit")
 
     cap = cv2.VideoCapture(CAM_INDEX)
     if not cap.isOpened():
@@ -355,7 +367,8 @@ def main():
 
         err_str  = "nan" if (error    != error)    else f"{error:+.3f}"
         look_str = "nan" if (lookahead != lookahead) else f"{lookahead:+.3f}"
-        line1 = f"err={err_str}  look={look_str}  strips={len(strip_points)}/{num_strips}  lost={consecutive_lost}"
+        union_str = "  [UNION sampling: drag adds to range]" if _sel['union'] else ""
+        line1 = f"err={err_str}  look={look_str}  strips={len(strip_points)}/{num_strips}  lost={consecutive_lost}{union_str}"
         line2 = f"mask={mask_area}  {fit_status}"
         for y, txt in ((22, line1), (44, line2)):
             cv2.putText(frame, txt, (8, y), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 3)
@@ -381,6 +394,9 @@ def main():
         key = cv2.waitKey(1) & 0xFF
         if key in (27, ord("q")):
             break
+        if key == ord("u"):
+            _sel['union'] = not _sel['union']
+            print(f"[viz] union sampling {'ON' if _sel['union'] else 'OFF'}")
         if key == ord("s"):
             save_params(YAML_PATH, [
                 ("roi_height_percent",  f"{roi_pct_t:.2f}"),
