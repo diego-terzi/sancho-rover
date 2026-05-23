@@ -4,10 +4,10 @@ camera_node:
     frame_width: 640
     frame_height: 480
     publish_rate_hz: 30.0
-    lab_a_min: 100              # A channel lower bound (green-red axis, 0-255; 128=neutral)
-    lab_a_max: 145              # A channel upper bound
+    lab_a_min: 80               # A channel lower bound (green-red axis, 0-255; 128=neutral)
+    lab_a_max: 136              # A channel upper bound
     lab_b_min: 60               # B channel lower bound (blue-yellow axis; blue = LOW values below 128)
-    lab_b_max: 115              # B channel upper bound — tune with visualizer drag-to-sample
+    lab_b_max: 131              # B channel upper bound — tune with visualizer drag-to-sample
     clahe_clip: 2.0             # CLAHE clipLimit — aggressiveness of local contrast normalisation
     clahe_tile: 8               # CLAHE tileGridSize (n×n grid)
     roi_height_percent: 1.00
