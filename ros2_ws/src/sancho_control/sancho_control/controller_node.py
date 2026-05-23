@@ -8,16 +8,10 @@ State machine:
 
 Control law on FOLLOWING:
     angular.z = -(Kp*err + Ki*∫err + Kd*ḋerr)
-    raw = max(|err|, |lookahead|)
-    curve_intensity = 0                                   if raw <= curve_deadzone
-                    = clip(curve_sensitivity * (raw - curve_deadzone)/(1 - curve_deadzone), 0, 1)  else
-              # Deadzone => straight-line jitter never shaves top speed.
-              # curve_sensitivity > 1 anticipates braking before the bend gets sharp.
-    linear.x  = min(max_linear_speed,
-                    v_motor_max * (1 - (1 - slow_speed_ratio) * curve_intensity))
-              # max_linear_speed caps top speed BELOW v_motor_max so we keep
-              # PWM headroom for the differential — otherwise the outer track
-              # saturates at v_max and the rover can't actually turn sharply.
+    linear.x  = max_speed * (1 - (1 - slow_speed_ratio) * |lookahead_err|)
+              # lookahead_err = trail position at a row higher in the ROI,
+              # i.e. "where the trail is going", from /trail_lookahead_error.
+              # 0 → full speed, ±1 → slow_speed_ratio * max_speed.
 """
 
 import math
@@ -40,14 +34,11 @@ class ControllerNode(Node):
 
         motor_rpm                = float(self.declare_parameter('motor_rpm', 300.0).value)
         wheel_diameter           = float(self.declare_parameter('wheel_diameter', 0.09).value)
-        self.v_motor_max         = math.pi * wheel_diameter * motor_rpm / 60.0
-        self.max_linear_speed    = float(self.declare_parameter('max_linear_speed', 0.7).value)
+        self.max_speed           = math.pi * wheel_diameter * motor_rpm / 60.0
         self.kp                  = float(self.declare_parameter('pid_kp', 1.5).value)
         self.ki                  = float(self.declare_parameter('pid_ki', 0.0).value)
         self.kd                  = float(self.declare_parameter('pid_kd', 0.1).value)
-        self.slow_speed_ratio    = float(self.declare_parameter('slow_speed_ratio', 0.25).value)
-        self.curve_sensitivity   = float(self.declare_parameter('curve_sensitivity', 2.0).value)
-        self.curve_deadzone      = float(self.declare_parameter('curve_deadzone', 0.2).value)
+        self.slow_speed_ratio    = float(self.declare_parameter('slow_speed_ratio', 0.5).value)
         self.trail_lost_timeout  = float(self.declare_parameter('trail_lost_timeout', 2.0).value)
         self.obstacle_distance_m = float(self.declare_parameter('obstacle_distance_m', 0.3).value)
         self.control_rate_hz     = float(self.declare_parameter('control_rate_hz', 20.0).value)
@@ -134,21 +125,12 @@ class ControllerNode(Node):
             angular_z = -angular_correction
             angular_z = max(-self.max_angular_z, min(self.max_angular_z, angular_z))
 
-            # Slowdown driven by the worst of {current lateral error, lookahead}.
-            # A deadzone keeps straight-line jitter from shaving top speed: below
-            # curve_deadzone there is zero slowdown (full speed); above it the
-            # [deadzone, 1] range is rescaled to [0, 1] so braking still ramps
-            # fully on real curves, amplified by curve_sensitivity to anticipate.
-            raw_intensity = max(abs(error), abs(self.last_lookahead_err))
-            if raw_intensity <= self.curve_deadzone:
-                curve_intensity = 0.0
-            else:
-                span     = max(1e-3, 1.0 - self.curve_deadzone)
-                rescaled = (raw_intensity - self.curve_deadzone) / span
-                curve_intensity = min(1.0, self.curve_sensitivity * rescaled)
-            speed = self.v_motor_max * (1.0 - (1.0 - self.slow_speed_ratio) * curve_intensity)
-            # Hard cap — keeps PWM headroom for the steering differential.
-            speed = min(speed, self.max_linear_speed)
+            # Speed reduced proportionally to how much the trail curves *ahead*
+            # of the rover. lookahead_err = 0 → full max_speed; lookahead_err = ±1
+            # → max_speed * slow_speed_ratio. Linear ramp in between. Steering is
+            # unaffected — only the longitudinal velocity is modulated.
+            curve_intensity = min(1.0, abs(self.last_lookahead_err))
+            speed = self.max_speed * (1.0 - (1.0 - self.slow_speed_ratio) * curve_intensity)
 
             cmd.linear.x  = speed
             cmd.angular.z = angular_z
