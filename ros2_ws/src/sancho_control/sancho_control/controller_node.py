@@ -1,5 +1,5 @@
 """
-Controller node: converts trail_error + obstacle distance into /cmd_vel.
+Controller node: converts trail_error + obstacle distance into /trail_cmd_vel.
 
 State machine:
     FOLLOWING       Pure PID on lateral error, full speed by default.
@@ -51,7 +51,7 @@ class ControllerNode(Node):
         self.create_subscription(Float32, 'trail_error',           self._on_trail_error, 1)
         self.create_subscription(Float32, 'trail_lookahead_error', self._on_lookahead,   1)
         self.create_subscription(Range,   'scan',                  self._on_scan,        1)
-        self.cmd_pub = self.create_publisher(Twist, 'cmd_vel', 1)
+        self.cmd_pub = self.create_publisher(Twist, 'trail_cmd_vel', 1)
 
         self.last_valid_error   = 0.0
         self.last_valid_time    = None

@@ -19,3 +19,6 @@ venv/
 # OS
 .DS_Store
 Thumbs.db
+
+# Internal analysis docs — not for the repo
+docs/internal/

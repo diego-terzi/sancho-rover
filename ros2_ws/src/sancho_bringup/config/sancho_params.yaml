@@ -66,3 +66,47 @@ sensor_node:
     field_of_view_rad: 0.26     # ~15° HC-SR04 cone
     min_range_m: 0.02
     max_range_m: 4.0
+
+follow_camera_node:
+  ros__parameters:
+    camera_index: 0
+    frame_width: 640
+    frame_height: 480
+    publish_rate_hz: 30.0
+    aruco_dict: "DICT_4X4_50"
+    marker_id: 0
+    marker_size_m: 0.10
+    camera_matrix: []           # 9 floats row-major; empty = no pose estimation
+    dist_coeffs: []             # 5 floats; empty = no pose estimation
+    lost_marker_patience: 10
+    ema_alpha: 0.3
+    show_debug: true
+
+follow_controller_node:
+  ros__parameters:
+    target_distance_m: 1.2
+    min_safe_distance_m: 0.5
+    max_follow_distance_m: 3.0
+    pid_lat_kp: 1.5
+    pid_lat_ki: 0.0
+    pid_lat_kd: 0.1
+    pid_lon_kp: 0.8
+    pid_lon_ki: 0.0
+    pid_lon_kd: 0.05
+    max_linear_speed: 0.8
+    max_angular_z: 2.0
+    waiting_entry_error_m: 0.15
+    waiting_exit_error_m: 0.25
+    waiting_frames: 12
+    marker_lost_timeout: 1.5
+    control_rate_hz: 20.0
+
+mode_manager_node:
+  ros__parameters:
+    gpio_chip: "gpiochip0"
+    gpio_pin_trail: 0           # PLACEHOLDER X — replace with actual QRB2210 GPIO pin for TRAIL position
+    gpio_pin_follow: 1          # PLACEHOLDER Y — replace with actual QRB2210 GPIO pin for FOLLOW position
+    poll_rate_hz: 20.0
+    switch_debounce_ms: 50.0
+    transition_stop_ms: 200.0
+    default_mode: "TRAIL"       # mode used if GPIO read fails (safe fallback)

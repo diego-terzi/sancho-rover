@@ -12,7 +12,7 @@ Autore: Visual Tutor Refactoring
 
 import rclpy
 from rclpy.node import Node
-from std_msgs.msg import Float32
+from std_msgs.msg import Float32, String
 from sensor_msgs.msg import Image
 from cv_bridge import CvBridge
 import cv2
@@ -211,12 +211,18 @@ class CameraNode(Node):
         self.mask_view_pub = self.create_publisher(Image, 'camera/mask_view', 1)
         self.debug_view_pub = self.create_publisher(Image, 'camera/debug_view', 1)
 
-        # Configurazione Videocamera
-        cam_idx = int(self.declare_parameter('camera_index', 0).value)
-        self.cap = cv2.VideoCapture(cam_idx)
-        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, int(self.declare_parameter('frame_width', 640).value))
-        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, int(self.declare_parameter('frame_height', 480).value))
-        
+        # ── Mode arbitration ──────────────────────────────────────────────
+        self._active_mode = 'TRAIL'
+        self.create_subscription(String, 'active_mode', self._on_active_mode, 1)
+
+        # ── Videocamera ────────────────────────────────────────────────────
+        self._cam_idx      = int(self.declare_parameter('camera_index', 0).value)
+        self._frame_width  = int(self.declare_parameter('frame_width',  640).value)
+        self._frame_height = int(self.declare_parameter('frame_height', 480).value)
+        self.cap = cv2.VideoCapture(self._cam_idx)
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH,  self._frame_width)
+        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self._frame_height)
+
         if not self.cap.isOpened():
             self.get_logger().error('Impossibile accedere alla webcam!')
             raise RuntimeError('Camera open failed')
@@ -225,7 +231,26 @@ class CameraNode(Node):
         self.timer = self.create_timer(1.0 / self.publish_rate_hz, self.process_frame)
         self.get_logger().info('CameraNode avviato con successo [Pipeline Pulita + Streaming Live Attivo]')
 
+    def _on_active_mode(self, msg: String):
+        new_mode = msg.data
+        if new_mode == self._active_mode:
+            return
+        if new_mode == 'FOLLOW':
+            if self.cap.isOpened():
+                self.cap.release()
+            self.get_logger().info('FOLLOW mode: camera released')
+        elif new_mode == 'TRAIL':
+            if not self.cap.isOpened():
+                self.cap = cv2.VideoCapture(self._cam_idx)
+                self.cap.set(cv2.CAP_PROP_FRAME_WIDTH,  self._frame_width)
+                self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self._frame_height)
+            self.get_logger().info('TRAIL mode: camera opened')
+        self._active_mode = new_mode
+
+    # ──────────────────────────────────────────────────────────────────────
     def process_frame(self):
+        if self._active_mode != 'TRAIL':
+            return
         ret, frame = self.cap.read()
         if not ret:
             self.get_logger().warn('Frame non letto correttamente dalla sorgente video')
@@ -310,7 +335,10 @@ class CameraNode(Node):
             self.get_logger().error(f"Errore durante lo streaming delle immagini: {e}")
 
     def destroy_node(self):
-        self.cap.release()
+        self._tunnel.stop()
+        self._mjpeg_server.stop()
+        if self.cap.isOpened():
+            self.cap.release()
         super().destroy_node()
 
 

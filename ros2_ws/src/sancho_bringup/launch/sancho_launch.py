@@ -65,4 +65,25 @@ def generate_launch_description():
             parameters=[config],
             output='screen',
         ),
+        Node(
+            package='sancho_follow_perception',
+            executable='follow_camera_node',
+            name='follow_camera_node',
+            parameters=[config],
+            output='screen',
+        ),
+        Node(
+            package='sancho_follow_control',
+            executable='follow_controller_node',
+            name='follow_controller_node',
+            parameters=[config],
+            output='screen',
+        ),
+        Node(
+            package='sancho_mode_manager',
+            executable='mode_manager_node',
+            name='mode_manager_node',
+            parameters=[config],
+            output='screen',
+        ),
     ])
