@@ -286,7 +286,46 @@ ros2 topic echo /trail_error      # the normalised error
 ros2 topic echo /trail_heading    # the fitted-line slope (rad)
 ```
 
-If you really need to see the camera frames, mount your X socket:
+#### Live camera view on your laptop (rqt over X) — recommended
+
+`camera_node` *always* publishes the annotated feed on `/camera/debug_view`
+(BGR with the fitted line, strip centroids, ROI box) and the binary
+`/camera/mask_view`. To watch them in real time while the rover drives, without
+touching the running stack, use [`tools/view_camera_live.sh`](../tools/view_camera_live.sh).
+
+From your laptop (Linux):
+
+```bash
+ssh -X giacomo@<uno-q-ip>          # X forwarding; use -Y if -X is refused
+```
+
+Then on the UNO Q, with the stack already running (`docker ps` shows a
+`sancho_rover:latest` container):
+
+```bash
+xhost +local:                       # once per login: let containers use X
+cd ~/sancho-rover                   # repo checkout on the rover
+./tools/view_camera_live.sh                     # opens /camera/debug_view
+./tools/view_camera_live.sh /camera/mask_view   # or the binary mask
+```
+
+The script spins up a throwaway container on the same `rover1_default` network
+(so it sees the DDS topics) with the X socket mounted, and runs
+`rqt_image_view`. Its window tunnels back to your laptop over the SSH `-X`
+connection. Closing the window leaves the rover untouched. If you renamed the
+App Lab app, pass the network via `SANCHO_NETWORK=<name>_default`.
+
+This needs `ros-jazzy-rqt-image-view` in the image — already added to the
+Dockerfile, so rebuild once (`docker build -f docker/Dockerfile -t
+sancho_rover:latest .`) after pulling this change.
+
+> X forwarding over WiFi can lag at 30 fps; if it's choppy, view
+> `/camera/mask_view` (mono8, lighter) or drop `publish_rate_hz` in the YAML.
+
+#### Alternative: cv2.imshow windows directly
+
+If you instead want the node's own OpenCV windows, mount your X socket on the
+*main* `docker run` and re-enable debug rendering:
 ```bash
 docker run ... \
   -v /tmp/.X11-unix:/tmp/.X11-unix \

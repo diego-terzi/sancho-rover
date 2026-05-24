@@ -27,11 +27,16 @@ FROM ros:jazzy-ros-base-noble
 # python3-numpy  : transitive but pinned explicitly to avoid pip pulling its own
 # python3-pip    : needed for the Arduino Bridge Python client (next step)
 # v4l-utils      : v4l2-ctl, handy for camera diagnostics inside the container
+# rqt-image-view : live viewer for /camera/debug_view & /camera/mask_view over
+#                  X forwarding (see docs/deployment.md §5.5). Pulls in the Qt/X
+#                  client libs absent from ros-base; ~adds a few hundred MB but
+#                  only used interactively, never on the autonomous path.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         python3-opencv \
         python3-numpy \
         python3-pip \
         v4l-utils \
+        ros-jazzy-rqt-image-view \
     && rm -rf /var/lib/apt/lists/*
 
 # ── Arduino Bridge Python client ─────────────────────────────────────────────
