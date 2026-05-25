@@ -25,7 +25,7 @@ FROM ros:jazzy-ros-base-noble
 # ── system dependencies ──────────────────────────────────────────────────────
 # python3-opencv : used by camera_node and sim_node
 # python3-numpy  : transitive but pinned explicitly to avoid pip pulling its own
-# python3-pip    : needed for the Arduino Bridge Python client (next step)
+# python3-pip    : needed for the Arduino Bridge Python client and AI packages
 # v4l-utils      : v4l2-ctl, handy for camera diagnostics inside the container
 RUN apt-get update && apt-get install -y --no-install-recommends \
         python3-opencv \
@@ -37,16 +37,23 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # ── Arduino Bridge Python client ─────────────────────────────────────────────
 # Used by motor_bridge_node to call set_motors() on the MCU over the internal
 # UART. If this install fails the node falls back to dry_run mode and logs
-# the failure — the rest of the stack still works (controller, camera, sim).
-# TODO: confirm the exact package name once the Arduino UNO Q SDK is finalised.
+# the failure.
 RUN pip3 install --no-cache-dir --break-system-packages arduino-bridge || \
     echo "WARNING: arduino-bridge not installed; motor_bridge_node will run in dry_run."
+
+# ── AI & Vision Dependencies (YOLOv8) ────────────────────────────────────────
+# 1. Install PyTorch exclusively for CPU. This prevents downloading ~1.5GB of 
+#    useless Nvidia CUDA drivers that would exhaust the Arduino's storage.
+RUN pip3 install torch torchvision --index-url https://download.pytorch.org/whl/cpu --no-cache-dir --break-system-packages
+
+# 2. Install Ultralytics for YOLO inference.
+RUN pip3 install ultralytics --no-cache-dir --break-system-packages
 
 # ── workspace build ──────────────────────────────────────────────────────────
 WORKDIR /ros2_ws
 COPY ros2_ws/src ./src
 
-# Resolve declared deps from package.xml and build all four packages.
+# Resolve declared deps from package.xml and build all packages.
 RUN . /opt/ros/jazzy/setup.sh && \
     apt-get update && \
     rosdep update --rosdistro jazzy && \
@@ -56,7 +63,4 @@ RUN . /opt/ros/jazzy/setup.sh && \
 
 # ── entrypoint ───────────────────────────────────────────────────────────────
 # Source the ROS 2 underlay + our workspace overlay, then launch the full stack.
-# Any extra args on `docker run image_name <args>` are forwarded to ros2 launch
-# as launch arguments, e.g. `docker run ... sancho_rover:latest wheel_separation:=0.45`
-# overrides the wheel_separation parameter for that run only.
 ENTRYPOINT ["/bin/bash", "-c", "source /opt/ros/jazzy/setup.bash && source /ros2_ws/install/setup.bash && exec ros2 launch sancho_bringup sancho_launch.py \"$@\"", "--"]

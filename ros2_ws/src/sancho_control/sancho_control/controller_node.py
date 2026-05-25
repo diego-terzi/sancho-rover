@@ -1,149 +1,92 @@
-"""
-Controller node: converts trail_error + obstacle distance into /cmd_vel.
-
-State machine:
-    FOLLOWING       Pure PID on lateral error, full speed by default.
-    TRAIL_LOST      No valid trail for > trail_lost_timeout: stop.
-    OBSTACLE_STOP   Front distance < obstacle_distance_m: stop (top priority).
-
-Control law on FOLLOWING:
-    angular.z = -(Kp*err + Ki*∫err + Kd*ḋerr)
-    linear.x  = max_speed * (1 - (1 - slow_speed_ratio) * curve_intensity)
-              # curve_intensity = min(1, (divergence_gain * |lookahead_err - err|)^2)
-              # divergence = how much the trail *ahead* (lookahead_err, from
-              # /trail_lookahead_error) differs from where it is *now* (err).
-              # Straight trail → divergence ~0 → full speed; a curve coming up
-              # makes the two diverge → speed drops (quadratically, so it stays
-              # gentle for small offsets then falls off fast).
-"""
-
-import math
-from enum import Enum, auto
 import rclpy
 from rclpy.node import Node
-from std_msgs.msg import Float32
-from sensor_msgs.msg import Range
-from geometry_msgs.msg import Twist
-
-class State(Enum):
-    FOLLOWING = auto()
-    TRAIL_LOST = auto()
-    OBSTACLE_STOP = auto()
-
+from geometry_msgs.msg import Point, Twist
+import time
 
 class ControllerNode(Node):
     def __init__(self):
         super().__init__('controller_node')
+        
+        # --- ROS 2 I/O ---
+        # Ascolta i dati estratti da YOLO
+        self.subscription = self.create_subscription(
+            Point, 'target_tracking', self.tracking_callback, 10)
+        
+        # Invia i comandi motori al motor_bridge_node
+        self.publisher = self.create_publisher(Twist, 'cmd_vel', 10)
+        
+        # Timer di sicurezza (Watchdog a 10 Hz)
+        self.watchdog_timer = self.create_timer(0.1, self.watchdog_check)
 
-        motor_rpm                = float(self.declare_parameter('motor_rpm', 300.0).value)
-        wheel_diameter           = float(self.declare_parameter('wheel_diameter', 0.09).value)
-        self.max_speed           = math.pi * wheel_diameter * motor_rpm / 60.0
-        self.kp                  = float(self.declare_parameter('pid_kp', 1.5).value)
-        self.ki                  = float(self.declare_parameter('pid_ki', 0.0).value)
-        self.kd                  = float(self.declare_parameter('pid_kd', 0.1).value)
-        self.slow_speed_ratio    = float(self.declare_parameter('slow_speed_ratio', 0.5).value)
-        self.divergence_gain     = float(self.declare_parameter('divergence_gain', 2.5).value)
-        self.trail_lost_timeout  = float(self.declare_parameter('trail_lost_timeout', 2.0).value)
-        self.obstacle_distance_m = float(self.declare_parameter('obstacle_distance_m', 0.3).value)
-        self.control_rate_hz     = float(self.declare_parameter('control_rate_hz', 20.0).value)
-        self.max_angular_z       = float(self.declare_parameter('max_angular_z', 2.0).value)
+        # --- PARAMETRI DI CONTROLLO (Tuning) ---
+        self.TARGET_DISTANCE = 1.5     # Distanza ideale in metri
+        self.SAFE_DISTANCE = 1.2       # Sotto questa distanza, frenata d'emergenza
+        self.MAX_DISTANCE = 3.5        # Oltre questa, velocità massima
+        self.MAX_LINEAR_SPEED = 2.0    # m/s (La velocità di picco del tuo rover)
+        self.MAX_ANGULAR_SPEED = 1.5   # rad/s (Velocità massima di rotazione)
+        
+        # --- STATO INTERNO E FILTRI ---
+        self.last_msg_time = time.time()
+        
+        # Variabili per il filtro passa-basso (EMA - Exponential Moving Average)
+        # Rendono i movimenti fluidi ignorando il "rumore" della telecamera
+        self.smoothed_distance = None
+        self.smoothed_offset = 0.0
+        self.alpha = 0.2  # Quanto il filtro è "pesante" (0.1 = molto fluido/lento, 0.9 = molto reattivo/nervoso)
 
-        self.create_subscription(Float32, 'trail_error',           self._on_trail_error, 1)
-        self.create_subscription(Float32, 'trail_lookahead_error', self._on_lookahead,   1)
-        self.create_subscription(Range,   'scan',                  self._on_scan,        1)
-        self.cmd_pub = self.create_publisher(Twist, 'cmd_vel', 1)
+        self.get_logger().info("Nodo Controller avviato. In attesa del target...")
 
-        self.last_valid_error   = 0.0
-        self.last_valid_time    = None
-        self.last_lookahead_err = 0.0
-        self.last_distance      = float('inf')
-        self.last_distance_time = None
-        self.prev_error = 0.0
-        self.integral = 0.0
-        self.current_state = State.TRAIL_LOST
-        self.dt = 1.0 / self.control_rate_hz
-        self.timer = self.create_timer(self.dt, self._control_step)
+    def tracking_callback(self, msg):
+        # Aggiorna il watchdog
+        self.last_msg_time = time.time()
 
-        self.get_logger().info('Controller node started')
+        raw_distance = msg.x
+        raw_offset = msg.y
 
-    def _on_trail_error(self, msg: Float32):
-        if not math.isnan(msg.data):
-            self.last_valid_error = float(msg.data)
-            self.last_valid_time = self.get_clock().now()
-
-    def _on_lookahead(self, msg: Float32):
-        if not math.isnan(msg.data):
-            self.last_lookahead_err = float(msg.data)
-
-    def _on_scan(self, msg: Range):
-        self.last_distance = float(msg.range)
-        self.last_distance_time = self.get_clock().now()
-
-    def _control_step(self):
-        now = self.get_clock().now()
-        obstacle_close = (
-            self.last_distance_time is not None
-            and self.last_distance < self.obstacle_distance_m
-        )
-        trail_fresh = (
-            self.last_valid_time is not None
-            and (now - self.last_valid_time).nanoseconds * 1e-9 <= self.trail_lost_timeout
-        )
-        if obstacle_close:
-            next_state = State.OBSTACLE_STOP
-        elif trail_fresh:
-            next_state = State.FOLLOWING
+        # --- 1. APPLICAZIONE DEL FILTRO FLUIDO ---
+        if self.smoothed_distance is None:
+            self.smoothed_distance = raw_distance # Inizializzazione al primo colpo
         else:
-            next_state = State.TRAIL_LOST
+            self.smoothed_distance = (self.alpha * raw_distance) + ((1.0 - self.alpha) * self.smoothed_distance)
+            self.smoothed_offset = (self.alpha * raw_offset) + ((1.0 - self.alpha) * self.smoothed_offset)
 
-        if next_state != self.current_state:
-            self.get_logger().info(
-                f'state: {self.current_state.name} -> {next_state.name}'
-            )
-            if next_state == State.FOLLOWING:
-                # Fresh start on re-entry: prevents integral windup from a long
-                # stop, and avoids a derivative kick when the trail re-appears
-                # at a very different position than it was lost at.
-                self.integral           = 0.0
-                self.prev_error         = self.last_valid_error
-                # Drop any stale anticipation from before the trail was lost.
-                self.last_lookahead_err = 0.0
-            self.current_state = next_state
+        # --- 2. CALCOLO VELOCITÀ LINEARE (Avanti/Indietro) ---
+        linear_x = 0.0
+        
+        if self.smoothed_distance <= self.SAFE_DISTANCE:
+            linear_x = 0.0  # Troppo vicino: FERMO!
+        elif self.smoothed_distance >= self.MAX_DISTANCE:
+            linear_x = self.MAX_LINEAR_SPEED  # Molto lontano: VELOCITÀ MASSIMA!
+        else:
+            # Interpolazione lineare morbida: accelera proporzionalmente man mano che l'oggetto si allontana
+            # Mappa la distanza [1.2 -> 3.5] alla velocità [0.0 -> 2.0]
+            ratio = (self.smoothed_distance - self.SAFE_DISTANCE) / (self.MAX_DISTANCE - self.SAFE_DISTANCE)
+            linear_x = ratio * self.MAX_LINEAR_SPEED
 
+        # --- 3. CALCOLO VELOCITÀ ANGOLARE (Destra/Sinistra) ---
+        # L'offset va da -1 (sinistra) a +1 (destra).
+        # In ROS (REP-103), angular.z POSITIVO = gira a sinistra. 
+        # Quindi se l'offset è +0.5 (target a destra), dobbiamo girare a destra (angular.z NEGATIVO).
+        angular_z = -1.0 * self.smoothed_offset * self.MAX_ANGULAR_SPEED
+        
+        # --- 4. PUBBLICAZIONE DEL COMANDO MOTORI ---
         cmd = Twist()
+        cmd.linear.x = float(linear_x)
+        cmd.angular.z = float(angular_z)
+        self.publisher.publish(cmd)
+        
+        # Log per debug
+        self.get_logger().debug(f"Dist: {self.smoothed_distance:.2f}m -> Vx: {linear_x:.2f} | Offset: {self.smoothed_offset:.2f} -> Wz: {angular_z:.2f}")
 
-        if self.current_state == State.FOLLOWING:
-            error = self.last_valid_error
-
-            self.integral += error * self.dt
-            derivative = (error - self.prev_error) / self.dt
-            self.prev_error = error
-
-            angular_correction = (
-                self.kp * error
-                + self.ki * self.integral
-                + self.kd * derivative
-            )
-            # Positive error = trail to the right → turn right →
-            # angular.z negative (ROS REP-103: +z is CCW / left turn).
-            angular_z = -angular_correction
-            angular_z = max(-self.max_angular_z, min(self.max_angular_z, angular_z))
-
-            # Speed reduced by how much the trail *ahead* diverges from where it
-            # is *now*: divergence = |lookahead_err - error|. Straight trail →
-            # divergence ~0 → full max_speed; a curve coming up makes them diverge.
-            # The divergence_gain amplifies it (the lookahead rarely reaches ±1
-            # on its own) and the square keeps the cut gentle for small offsets
-            # then steep beyond. Steering is unaffected — only longitudinal speed.
-            divergence = abs(self.last_lookahead_err - error)
-            curve_intensity = min(1.0, (self.divergence_gain * divergence) ** 2)
-            speed = self.max_speed * (1.0 - (1.0 - self.slow_speed_ratio) * curve_intensity)
-
-            cmd.linear.x  = speed
-            cmd.angular.z = angular_z
-
-        self.cmd_pub.publish(cmd)
-
+    def watchdog_check(self):
+        # Se il nodo visione si blocca o perde il target per più di 0.5 secondi, ferma il rover.
+        if time.time() - self.last_msg_time > 0.5:
+            cmd = Twist()
+            cmd.linear.x = 0.0
+            cmd.angular.z = 0.0
+            self.publisher.publish(cmd)
+            # Resetta la memoria del filtro per la prossima volta che trova il target
+            self.smoothed_distance = None 
 
 def main(args=None):
     rclpy.init(args=args)
@@ -153,8 +96,11 @@ def main(args=None):
     except KeyboardInterrupt:
         pass
     finally:
+        # Frena prima di spegnersi
+        stop_cmd = Twist()
+        node.publisher.publish(stop_cmd)
         node.destroy_node()
-
+        rclpy.shutdown()
 
 if __name__ == '__main__':
     main()
