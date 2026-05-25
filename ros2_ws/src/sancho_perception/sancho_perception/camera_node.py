@@ -14,11 +14,13 @@ Modello:    YOLOv8 instance segmentation, 1 classe (blue_line)
             output1: [1, 32, 160, 160] — prototype masks
 """
 
+import os
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Float32, String
 from sensor_msgs.msg import Image
 from cv_bridge import CvBridge
+from ament_index_python.packages import get_package_share_directory
 import cv2
 import numpy as np
 
@@ -159,6 +161,13 @@ class CameraNode(Node):
             'models/trail_detector.onnx'
         ).value)
 
+        # Risolve path relativo rispetto alla share directory del pacchetto
+        if not os.path.isabs(model_path):
+            model_path = os.path.join(
+                get_package_share_directory('sancho_perception'),
+                model_path
+            )
+
         try:
             import onnxruntime as ort
             self.model = ort.InferenceSession(
@@ -166,7 +175,6 @@ class CameraNode(Node):
             )
             self.get_logger().info(f'Modello ONNX caricato: {model_path}')
         except Exception as e:
-            # Nodo avviabile anche senza modello — get_trail_mask() restituirà maschera vuota
             self.get_logger().warn(f'Modello ONNX non caricato ({e}) — rilevazione disabilitata')
             self.model = None
 
@@ -242,8 +250,7 @@ class CameraNode(Node):
         roi_y0 = int(h * (1.0 - self.roi_height_percent))
         roi = frame[roi_y0:, :].copy()
 
-        # 1. Segmentazione istanza: ottieni maschera binaria dal modello YOLO/RF-DETR
-        # TODO (Giacomo): quando il modello è caricato, get_trail_mask() farà l'inferenza reale
+        # 1. Segmentazione istanza: maschera binaria dal modello YOLOv8-seg ONNX
         clean_mask = get_trail_mask(roi, self.model)
 
         # Creiamo un'area di disegno per l'overlay grafico sul frame completo
@@ -305,8 +312,6 @@ class CameraNode(Node):
             self.get_logger().error(f"Errore durante lo streaming delle immagini: {e}")
 
     def destroy_node(self):
-        self._tunnel.stop()
-        self._mjpeg_server.stop()
         if self.cap.isOpened():
             self.cap.release()
         super().destroy_node()

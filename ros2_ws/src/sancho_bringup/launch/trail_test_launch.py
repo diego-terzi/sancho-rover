@@ -50,11 +50,4 @@ def generate_launch_description():
             ],
             output='screen',
         ),
-        Node(
-            package='sancho_perception',
-            executable='sensor_node',
-            name='sensor_node',
-            parameters=[config],
-            output='screen',
-        ),
     ])
