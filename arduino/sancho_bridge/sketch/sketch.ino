@@ -1,54 +1,78 @@
-/*
+// SANCHO MCU firmware — trail following demo
+//
+// Riceve set_motors(L, R) via Bridge dal Python shim e pilota i 4 motori.
+// 4 LED indicano lo stato del rover:
+//   verde  (14) — acceso quando i motori girano (rover segue la traccia)
+//   blu    (15) — sempre acceso (modalità trail following attiva)
+//   giallo (16) — sempre spento (riservato a human following)
+//   rosso  (17) — lampeggia quando il rover è fermo / traccia persa
+//
+// Watchdog MCU: se non arriva set_motors per 500 ms, motori a 0.
+//
+// UNO Q PWM quirk (Zephyr): non usare pinMode sui pin motori.
+// Inizializzare con analogWrite(pin, 1) poi subito stopMotors().
 
 #include "Arduino_RouterBridge.h"
 
-// ── Forward-only PWM pins ────────────────────────────────────────────────────
+// ── Pin motori (RPWM only, forward-only, BTS7960) ───────────────────────────
 #define LEFT_FRONT_RPWM_PIN    9
 #define RIGHT_FRONT_RPWM_PIN   6
 #define LEFT_BACK_RPWM_PIN    10
 #define RIGHT_BACK_RPWM_PIN    3
 
-#define FRONT_SCALE  0.90f
-#define BACK_SCALE   1.00f
+// ── Compensazione RPM (front 333 RPM, rear 300 RPM) ─────────────────────────
+#define FRONT_SCALE  (300.0f / 333.0f)
 
-// ── Watchdog ─────────────────────────────────────────────────────────────────
+// ── Pin LED ──────────────────────────────────────────────────────────────────
+#define LED_GREEN   14
+#define LED_BLUE    15
+#define LED_YELLOW  16
+#define LED_RED     17
+
+// ── Timing ───────────────────────────────────────────────────────────────────
 #define MOTOR_WATCHDOG_MS  500UL
+#define RED_BLINK_MS       300UL
 
-const int LED_PIN = 12;
-const int BUZZER_PIN = 5;
+// ── Stato ────────────────────────────────────────────────────────────────────
+static int           _last_left        = 0;
+static int           _last_right       = 0;
+static unsigned long _last_cmd_ms      = 0;
+static unsigned long _last_log_ms      = 0;
+static uint32_t      _cmd_count        = 0;
 
-const int C_SHARP = 277;  // C#4
-const int B_NOTE  = 247;  // B3
-const int E_NOTE  = 330;  // E4
-const int REST    = 0;
+static unsigned long _last_blink_ms   = 0;
+static bool          _red_state       = false;
 
-unsigned long lastSetMotorsMs    = 0;
-unsigned long lastSetMotorsLogMs = 0;
-uint32_t      setMotorsCallCount = 0;
+// ── Helpers (dichiarati prima dei callback Bridge) ───────────────────────────
+void applyMotor(int pin, int pwm) {
+    if (pwm < 0)   pwm = 0;
+    if (pwm > 255) pwm = 255;
+    analogWrite(pin, pwm);
+}
 
-void applyMotor(int rpwm_pin, int pwm);
-void stopMotors();
+void stopMotors() {
+    analogWrite(LEFT_FRONT_RPWM_PIN,  0);
+    analogWrite(RIGHT_FRONT_RPWM_PIN, 0);
+    analogWrite(LEFT_BACK_RPWM_PIN,   0);
+    analogWrite(RIGHT_BACK_RPWM_PIN,  0);
+}
 
-// ── RPC handlers ─────────────────────────────────────────────────────────────
+// ── Bridge callbacks ─────────────────────────────────────────────────────────
 void setMotors(int left, int right) {
-    int left_front  = (int)(left  * FRONT_SCALE);
-    int right_front = (int)(right * FRONT_SCALE);
-    int left_back   = (int)(left  * BACK_SCALE);
-    int right_back  = (int)(right * BACK_SCALE);
+    applyMotor(LEFT_FRONT_RPWM_PIN,  (int)(left  * FRONT_SCALE));
+    applyMotor(RIGHT_FRONT_RPWM_PIN, (int)(right * FRONT_SCALE));
+    applyMotor(LEFT_BACK_RPWM_PIN,   left);
+    applyMotor(RIGHT_BACK_RPWM_PIN,  right);
 
-    applyMotor(LEFT_FRONT_RPWM_PIN,  left_front);
-    applyMotor(RIGHT_FRONT_RPWM_PIN, right_front);
-    applyMotor(LEFT_BACK_RPWM_PIN,   left_back);
-    applyMotor(RIGHT_BACK_RPWM_PIN,  right_back);
+    _last_left  = left;
+    _last_right = right;
+    _last_cmd_ms = millis();
 
-    lastSetMotorsMs = millis();
-
-    // Diagnostic — once every 5 s
-    setMotorsCallCount++;
-    if (millis() - lastSetMotorsLogMs > 5000UL) {
-        lastSetMotorsLogMs = millis();
+    _cmd_count++;
+    if (millis() - _last_log_ms > 5000UL) {
+        _last_log_ms = millis();
         Monitor.print("[setMotors #");
-        Monitor.print(setMotorsCallCount);
+        Monitor.print(_cmd_count);
         Monitor.print("] L=");
         Monitor.print(left);
         Monitor.print(" R=");
@@ -56,33 +80,30 @@ void setMotors(int left, int right) {
     }
 }
 
-struct Step { int freq; int duration; };
-
-// Tempi misurati dal waveform: loop totale ~2000 ms
-const Step riff[] = {
-  {C_SHARP, 150}, {REST,  50},    // nota 1  (0 → 200 ms)
-  {B_NOTE,  150}, {REST,  50},    // nota 2  (200 → 400 ms)
-  {C_SHARP, 200}, {REST, 300},    // nota 3 + pausa lunga  (400 → 900 ms)
-  {E_NOTE,  400}, {REST, 100},    // nota 4 accentata  (900 → 1400 ms)
-  {C_SHARP, 250}, {REST,  50},    // nota 5  (1400 → 1700 ms)
-  {C_SHARP, 200}, {REST, 100}     // nota 6 + silenzio di fine loop  (1700 → 2000 ms)
-};
-const int STEPS = sizeof(riff) / sizeof(Step);
-
 void emergencyStop() {
     stopMotors();
-    lastSetMotorsMs = 0;
+    _last_left  = 0;
+    _last_right = 0;
+    _last_cmd_ms = 0;
 }
 
 // ── Setup ────────────────────────────────────────────────────────────────────
 void setup() {
-    pinMode(LED_PIN, OUTPUT);
-    pinMode(BUZZER_PIN, OUTPUT);
     Bridge.begin();
     Monitor.begin();
 
-    // Force PWM peripheral init: brief PWM=1 pulse then 0. Without this, the
-    // first analogWrite(0) on a fresh pin can leave the peripheral inert.
+    // LED
+    pinMode(LED_GREEN,  OUTPUT);
+    pinMode(LED_BLUE,   OUTPUT);
+    pinMode(LED_YELLOW, OUTPUT);
+    pinMode(LED_RED,    OUTPUT);
+
+    digitalWrite(LED_GREEN,  LOW);
+    digitalWrite(LED_BLUE,   HIGH);  // sempre acceso
+    digitalWrite(LED_YELLOW, LOW);   // sempre spento
+    digitalWrite(LED_RED,    LOW);
+
+    // Forza init PWM (Zephyr quirk — senza questo il primo analogWrite(0) è inerte)
     analogWrite(LEFT_FRONT_RPWM_PIN,  1);
     analogWrite(RIGHT_FRONT_RPWM_PIN, 1);
     analogWrite(LEFT_BACK_RPWM_PIN,   1);
@@ -93,278 +114,33 @@ void setup() {
     Bridge.provide_safe("set_motors",     setMotors);
     Bridge.provide_safe("emergency_stop", emergencyStop);
 
-    Monitor.println("[sancho_bridge] MCU ready (motors-only)");
+    Monitor.println("[sancho_bridge] MCU ready — trail following demo");
 }
 
-// ── Main loop ────────────────────────────────────────────────────────────────
+// ── Loop ─────────────────────────────────────────────────────────────────────
 void loop() {
-    if (millis() - lastSetMotorsMs > MOTOR_WATCHDOG_MS) {
+    unsigned long now = millis();
+
+    // Watchdog: niente set_motors da troppo tempo → stop
+    if (_last_cmd_ms > 0 && (now - _last_cmd_ms) > MOTOR_WATCHDOG_MS) {
         stopMotors();
+        _last_left  = 0;
+        _last_right = 0;
     }
-}
 
-// ── Motor helpers ────────────────────────────────────────────────────────────
-void applyMotor(int rpwm_pin, int pwm) {
-    if (pwm < 0)   pwm = 0;
-    if (pwm > 255) pwm = 255;
-    analogWrite(rpwm_pin, pwm);
-}
+    // LED: verde se in movimento, rosso lampeggiante se fermo
+    bool moving = (_last_left != 0 || _last_right != 0);
 
-void stopMotors() {
-    analogWrite(LEFT_FRONT_RPWM_PIN,  0);
-    analogWrite(RIGHT_FRONT_RPWM_PIN, 0);
-    analogWrite(LEFT_BACK_RPWM_PIN,   0);
-    analogWrite(RIGHT_BACK_RPWM_PIN,  0);
-
-    for (int i = 0; i < STEPS; i++) {
-    int f = riff[i].freq;
-    int d = riff[i].duration;
-
-    if (f == REST) {
-      digitalWrite(LED_PIN, LOW);
-      noTone(BUZZER_PIN);
+    if (moving) {
+        digitalWrite(LED_GREEN, HIGH);
+        digitalWrite(LED_RED,   LOW);
+        _red_state = false;
     } else {
-      digitalWrite(LED_PIN, HIGH);
-      tone(BUZZER_PIN, f);
-    }
-    delay(d);
-  }
-
-}
-*/
-
-// SANCHO MCU firmware — 4WD motor control + end-of-mission signal.
-//
-// Motors: 4 BTS7960 modules driven on their RPWM input only (forward-only).
-//   Per-side scaling so the 333 RPM front motors don't outrun the 300 RPM
-//   rear ones (FRONT_SCALE = 300/333 ≈ 0.901, BACK_SCALE = 1.00).
-//
-// End-of-mission signal (LED + buzzer):
-//   When the rover has moved at least once and then stops (no non-zero motor
-//   command for CELEB_STOP_DEBOUNCE_MS), it plays a short riff one time.
-//   If the rover starts moving again, the riff arms again for the next stop.
-//   The trigger logic lives entirely on the MCU — no extra Bridge traffic
-//   needed; we infer "mission complete" from the motor commands.
-//
-// IMPORTANT — UNO Q PWM gotcha:
-//   On Zephyr, pinMode(pin, OUTPUT) BEFORE the first analogWrite(pin, val)
-//   leaves the PWM peripheral inert. We do NOT pinMode the motor pins;
-//   we force-init each with a brief PWM=1 pulse instead.
-//   pinMode on the LED pin (12) is fine — it's a plain digital out.
-//   tone() handles its own pin config, so no pinMode on the buzzer either.
-
-#include "Arduino_RouterBridge.h"
-
-// ── Motor pins (RPWM only, forward-only) ─────────────────────────────────────
-#define LEFT_FRONT_RPWM_PIN    9
-#define RIGHT_FRONT_RPWM_PIN   6
-#define LEFT_BACK_RPWM_PIN    10
-#define RIGHT_BACK_RPWM_PIN    3
-
-#define FRONT_SCALE  (300.0f / 333.0f)
-#define BACK_SCALE   1.00f
-
-// ── End-of-mission signal pins ──────────────────────────────────────────────
-#define LED_PIN       12
-#define BUZZER_PIN     5
-
-// ── Ultrasonic sensor pins ───────────────────────────────────────────────────
-#define TRIG_PIN   2
-#define ECHO_PIN   4
-
-// ── Timing ──────────────────────────────────────────────────────────────────
-#define MOTOR_WATCHDOG_MS         500UL
-#define CELEB_STOP_DEBOUNCE_MS   2000UL  // motors stopped this long → trigger riff
-
-// ── Celebration riff ────────────────────────────────────────────────────────
-const int REST     = 0;
-const int C_SHARP  = 277;  // C#4
-const int B_NOTE   = 247;  // B3
-const int E_NOTE   = 330;  // E4
-
-struct RiffStep { int freq; int duration_ms; };
-const RiffStep riff[] = {
-    {C_SHARP, 150}, {REST,  50},
-    {B_NOTE,  150}, {REST,  50},
-    {C_SHARP, 200}, {REST, 300},
-    {E_NOTE,  400}, {REST, 100},
-    {C_SHARP, 250}, {REST,  50},
-    {C_SHARP, 200}, {REST, 100},
-};
-const int RIFF_STEPS = sizeof(riff) / sizeof(RiffStep);
-
-// ── State ───────────────────────────────────────────────────────────────────
-unsigned long lastSetMotorsMs    = 0;
-unsigned long lastSetMotorsLogMs = 0;
-uint32_t      setMotorsCallCount = 0;
-
-unsigned long lastNonZeroMotorsMs = 0;
-bool          everMoved            = false;
-bool          armed                = false;  // ready to trigger on next stop
-bool          celebrating          = false;
-int           celebStepIdx         = 0;
-unsigned long celebStepStartMs     = 0;
-
-void applyMotor(int rpwm_pin, int pwm);
-void stopMotors();
-void updateCelebration();
-int  getDistance();
-
-// ── RPC handlers (called by Bridge.provide_safe) ─────────────────────────────
-void setMotors(int left, int right) {
-    int left_front  = (int)(left  * FRONT_SCALE);
-    int right_front = (int)(right * FRONT_SCALE);
-    int left_back   = (int)(left  * BACK_SCALE);
-    int right_back  = (int)(right * BACK_SCALE);
-
-    applyMotor(LEFT_FRONT_RPWM_PIN,  left_front);
-    applyMotor(RIGHT_FRONT_RPWM_PIN, right_front);
-    applyMotor(LEFT_BACK_RPWM_PIN,   left_back);
-    applyMotor(RIGHT_BACK_RPWM_PIN,  right_back);
-
-    lastSetMotorsMs = millis();
-
-    // Mission-state tracking. Any non-zero command counts as "moving".
-    if (left > 0 || right > 0) {
-        lastNonZeroMotorsMs = millis();
-        everMoved = true;
-        armed = true;
-        // If we were celebrating and the rover starts moving again, abort.
-        if (celebrating) {
-            celebrating = false;
-            noTone(BUZZER_PIN);
-            digitalWrite(LED_PIN, LOW);
+        digitalWrite(LED_GREEN, LOW);
+        if (now - _last_blink_ms >= RED_BLINK_MS) {
+            _red_state = !_red_state;
+            digitalWrite(LED_RED, _red_state ? HIGH : LOW);
+            _last_blink_ms = now;
         }
     }
-
-    // Diagnostic heartbeat — once every 5 s
-    setMotorsCallCount++;
-    if (millis() - lastSetMotorsLogMs > 5000UL) {
-        lastSetMotorsLogMs = millis();
-        Monitor.print("[setMotors #");
-        Monitor.print(setMotorsCallCount);
-        Monitor.print("] L=");
-        Monitor.print(left);
-        Monitor.print(" R=");
-        Monitor.println(right);
-    }
-}
-
-void emergencyStop() {
-    stopMotors();
-    lastSetMotorsMs = 0;
-}
-
-// ── Ultrasonic sensor ────────────────────────────────────────────────────────
-static int readDistanceCm() {
-    digitalWrite(TRIG_PIN, LOW);
-    delayMicroseconds(2);
-    digitalWrite(TRIG_PIN, HIGH);
-    delayMicroseconds(10);
-    digitalWrite(TRIG_PIN, LOW);
-    uint32_t duration = pulseIn(ECHO_PIN, HIGH, 15000);
-    if (duration == 0) return 999;
-    return (int)((duration * 343UL) / 20000UL);
-}
-
-int getDistance() {
-    return readDistanceCm();
-}
-
-// ── Setup ───────────────────────────────────────────────────────────────────
-void setup() {
-    Bridge.begin();
-    Monitor.begin();
-
-    // Force PWM peripheral init: brief PWM=1 pulse then 0. Without this, the
-    // first analogWrite(0) on a fresh pin can leave the peripheral inert.
-    analogWrite(LEFT_FRONT_RPWM_PIN,  1);
-    analogWrite(RIGHT_FRONT_RPWM_PIN, 1);
-    analogWrite(LEFT_BACK_RPWM_PIN,   1);
-    analogWrite(RIGHT_BACK_RPWM_PIN,  1);
-    delay(50);
-    stopMotors();
-
-    pinMode(LED_PIN, OUTPUT);
-    digitalWrite(LED_PIN, LOW);
-    noTone(BUZZER_PIN);
-
-    pinMode(TRIG_PIN, OUTPUT);
-    pinMode(ECHO_PIN, INPUT);
-
-    Bridge.provide_safe("set_motors",     setMotors);
-    Bridge.provide_safe("emergency_stop", emergencyStop);
-    Bridge.provide_safe("get_distance",   getDistance);
-
-    Monitor.println("[sancho_bridge] MCU ready (4WD + ultrasonic + end-of-mission signal)");
-}
-
-// ── Main loop ───────────────────────────────────────────────────────────────
-void loop() {
-    if (millis() - lastSetMotorsMs > MOTOR_WATCHDOG_MS) {
-        stopMotors();
-    }
-    updateCelebration();
-}
-
-// ── Motor helpers ───────────────────────────────────────────────────────────
-void applyMotor(int rpwm_pin, int pwm) {
-    if (pwm < 0)   pwm = 0;
-    if (pwm > 255) pwm = 255;
-    analogWrite(rpwm_pin, pwm);
-}
-
-void stopMotors() {
-    analogWrite(LEFT_FRONT_RPWM_PIN,  0);
-    analogWrite(RIGHT_FRONT_RPWM_PIN, 0);
-    analogWrite(LEFT_BACK_RPWM_PIN,   0);
-    analogWrite(RIGHT_BACK_RPWM_PIN,  0);
-}
-
-// Apply a step's buzzer output — called exactly once per step transition so
-// tone() is not restarted on every loop iteration (that would click/distort).
-static void applyRiffStep(int idx) {
-    const RiffStep& step = riff[idx];
-    if (step.freq == REST) {
-        noTone(BUZZER_PIN);
-    } else {
-        tone(BUZZER_PIN, step.freq);
-    }
-}
-
-// ── End-of-mission celebration (LED + buzzer) ───────────────────────────────
-void updateCelebration() {
-    // Arm-and-fire: rover must have moved this cycle (armed=true), and
-    // the motors must have been zero for CELEB_STOP_DEBOUNCE_MS.
-    if (!celebrating && armed && everMoved &&
-        (millis() - lastNonZeroMotorsMs > CELEB_STOP_DEBOUNCE_MS)) {
-        celebrating = true;
-        armed = false;                 // disarm until next motion
-        celebStepIdx = 0;
-        celebStepStartMs = millis();
-        digitalWrite(LED_PIN, HIGH);   // solid on for the whole riff
-        applyRiffStep(0);              // start the first note immediately
-        Monitor.println("[celebration] mission complete — playing riff");
-        return;
-    }
-
-    if (!celebrating) return;
-
-    // Has the current step's duration elapsed?
-    if (millis() - celebStepStartMs < (unsigned long)riff[celebStepIdx].duration_ms) {
-        return;  // still inside the current step, nothing to do
-    }
-
-    // Advance to next step
-    celebStepIdx++;
-    celebStepStartMs = millis();
-
-    if (celebStepIdx >= RIFF_STEPS) {
-        // Riff finished — loop it from the start. LED stays on the whole
-        // time; the riff keeps replaying until the rover starts moving again
-        // (setMotors detects non-zero PWM and aborts celebration).
-        celebStepIdx = 0;
-    }
-
-    applyRiffStep(celebStepIdx);
 }
