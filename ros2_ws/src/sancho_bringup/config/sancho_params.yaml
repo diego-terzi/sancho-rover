@@ -3,9 +3,9 @@ camera_node:
     camera_index: 0
     frame_width: 640
     frame_height: 480
-    publish_rate_hz: 10.0       # abbassato da 30Hz — RF-DETR/YOLO su ARM64 senza GPU
-    # TODO (Giacomo): aggiorna model_path con il path assoluto dopo aver copiato il .onnx sul rover
-    model_path: 'models/trail_segmentation.onnx'
+    publish_rate_hz: 10.0       # abbassato da 30Hz — inferenza su ARM64 senza GPU
+    roboflow_model_id: ''       # TODO: inserire dopo il training, es. "diego-terzi/sancho-trail/1"
+    roboflow_api_key: ''        # LASCIARE VUOTO — usare la variabile d'ambiente ROBOFLOW_API_KEY
     roi_height_percent: 1.00
     num_roi_strips: 3           # horizontal slices for multi-point line fit
     max_fit_residual_px: 30.0   # mean |x_pred-x_actual| across strips; above this the line fit is rejected

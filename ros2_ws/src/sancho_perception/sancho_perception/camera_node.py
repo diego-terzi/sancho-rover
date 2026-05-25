@@ -1,18 +1,18 @@
 """
-Camera Node - Yolo_Trail branch
---------------------------------
-Rileva la linea di nastro BLU tramite instance segmentation (RF-DETR/YOLO) e pubblica:
+Camera Node - Yolo_Trail_Test branch
+--------------------------------------
+Rileva la linea di nastro BLU tramite Roboflow Inference SDK e pubblica:
   - /trail_error            (Float32): Errore laterale per il PID
   - /trail_lookahead_error  (Float32): Errore anticipato per la velocità
   - /camera/mask_view       (Image): Streaming della maschera binaria pulita
   - /camera/debug_view      (Image): Streaming video con overlay grafico (linee, punti)
 
-TODO (Giacomo): caricare il modello ONNX esportato da Roboflow nel metodo __init__
-                e implementare get_trail_mask() con l'inferenza reale.
-                Modello atteso in: models/trail_segmentation.onnx
-                Dipendenza da aggiungere: onnxruntime (pip install onnxruntime)
+Dipendenza: pip install inference
+API key: impostare la variabile d'ambiente ROBOFLOW_API_KEY (non metterla nel codice/YAML)
+Model ID: impostare roboflow_model_id in sancho_params.yaml (es. "diego-terzi/sancho-trail/1")
 """
 
+import os
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Float32, String
@@ -20,32 +20,28 @@ from sensor_msgs.msg import Image
 from cv_bridge import CvBridge
 import cv2
 import numpy as np
+from inference import get_model
 
 
 def get_trail_mask(roi_bgr, model):
     """
-    1. FUNZIONE DI VISIONE: riceve il ROI BGR e il modello caricato,
-    restituisce una maschera binaria (uint8, stessa shape di roi_bgr[:,:,0])
-    dove 255 = nastro blu rilevato, 0 = sfondo.
-
-    TODO (Giacomo): implementare questa funzione con inferenza ONNX/RF-DETR.
-    Passi attesi:
-      1. Pre-processing: ridimensiona roi_bgr a 432x432, normalizza [0,1], aggiungi batch dim
-      2. Inferenza: output = model.run(None, {'images': input_tensor})
-      3. Post-processing: estrai la maschera di segmentazione dalla classe 'blue_line'
-                          e ridimensionala alle dimensioni originali del ROI
-      4. Ritorna la maschera come np.uint8 con valori 0/255
-
-    Struttura del modello:
-      - Formato: ONNX esportato da Roboflow (RF-DETR Segmentation Small/Medium)
-      - Path atteso: ros2_ws/src/sancho_perception/models/trail_segmentation.onnx
-      - Classe: 'blue_line' (o 'nastro_blu' — deve corrispondere al label su Roboflow)
-      - Input shape: [1, 3, 432, 432] float32, normalizzato 0-1
-      - IMPORTANTE: su Roboflow, nel dataset version, imposta resize a 432x432
+    Riceve il ROI BGR e il modello Roboflow caricato.
+    Restituisce una maschera binaria (uint8) dove 255 = nastro blu, 0 = sfondo.
+    Se il modello non è caricato restituisce una maschera vuota (nodo avviabile senza crash).
     """
-    # TODO (Giacomo): sostituire con inferenza reale
     h, w = roi_bgr.shape[:2]
-    return np.zeros((h, w), dtype=np.uint8)  # placeholder: maschera vuota
+    if model is None:
+        return np.zeros((h, w), dtype=np.uint8)
+
+    results = model.infer(roi_bgr)[0]
+    mask = np.zeros((h, w), dtype=np.uint8)
+    for pred in results.predictions:
+        if pred.class_name != 'blue_line':
+            continue
+        # pred.points è una lista di oggetti Point con attributi .x e .y
+        points = np.array([[int(p.x), int(p.y)] for p in pred.points], dtype=np.int32)
+        cv2.fillPoly(mask, [points], 255)
+    return mask
 
 
 def mask_to_error(clean_mask, *,
@@ -133,18 +129,21 @@ class CameraNode(Node):
         self.roi_height_percent = float(self.declare_parameter('roi_height_percent', 0.70).value)
         self.publish_rate_hz    = float(self.declare_parameter('publish_rate_hz', 10.0).value)
 
-        # Parametro path modello ONNX
-        model_path = str(self.declare_parameter(
-            'model_path',
-            'models/trail_segmentation.onnx'  # TODO (Giacomo): metti il path corretto dopo il training
-        ).value)
+        # Caricamento modello Roboflow Inference SDK
+        model_id = str(self.declare_parameter('roboflow_model_id', '').value)
+        api_key  = str(self.declare_parameter('roboflow_api_key', '').value) \
+                   or os.environ.get('ROBOFLOW_API_KEY', '')
 
-        # TODO (Giacomo): caricare il modello ONNX qui con onnxruntime.
-        # Esempio:
-        #   import onnxruntime as ort
-        #   self.model = ort.InferenceSession(model_path, providers=['CPUExecutionProvider'])
-        # Per ora self.model è None — get_trail_mask() restituisce una maschera vuota.
-        self.model = None
+        if not model_id:
+            self.get_logger().warn(
+                'roboflow_model_id non impostato — il nodo parte ma non rileva nulla. '
+                'Imposta il parametro in sancho_params.yaml (es. "workspace/progetto/1")'
+            )
+            self.model = None
+        else:
+            self.get_logger().info(f'Caricamento modello Roboflow: {model_id}')
+            self.model = get_model(model_id=model_id, api_key=api_key)
+            self.get_logger().info('Modello pronto (i pesi vengono scaricati in cache alla prima infer)')
 
         # Parametri Fitting Linea
         self.num_strips             = int(self.declare_parameter('num_roi_strips', 3).value)
