@@ -1,13 +1,16 @@
 """
-Camera Node - Versione Aggiornata e Rifattorizzata
---------------------------------------------------
-Rileva la linea di nastro tramite colore LAB + CLAHE e pubblica:
+Camera Node - Yolo_Trail branch
+--------------------------------
+Rileva la linea di nastro BLU tramite instance segmentation (RF-DETR/YOLO) e pubblica:
   - /trail_error            (Float32): Errore laterale per il PID
   - /trail_lookahead_error  (Float32): Errore anticipato per la velocità
   - /camera/mask_view       (Image): Streaming della maschera binaria pulita
   - /camera/debug_view      (Image): Streaming video con overlay grafico (linee, punti)
 
-Autore: Visual Tutor Refactoring
+TODO (Giacomo): caricare il modello ONNX esportato da Roboflow nel metodo __init__
+                e implementare get_trail_mask() con l'inferenza reale.
+                Modello atteso in: models/trail_segmentation.onnx
+                Dipendenza da aggiungere: onnxruntime (pip install onnxruntime)
 """
 
 import rclpy
@@ -19,69 +22,29 @@ import cv2
 import numpy as np
 
 
-def lab_mask(roi_bgr, *,
-             lab_lower, lab_upper,
-             clahe_clip, clahe_tile,
-             morph_k,
-             min_total_mask_area,
-             min_contour_area,
-             min_solidity,
-             min_tape_width_px,
-             min_elongation):
+def get_trail_mask(roi_bgr, model):
     """
-    1. FUNZIONE DI VISIONE: Converte in LAB, applica CLAHE, esegue la soglia colore
-    ed esclude i blob di rumore (non conformi al nastro) direttamente in questa fase.
-    Restituisce una maschera binaria già perfettamente pulita.
+    1. FUNZIONE DI VISIONE: riceve il ROI BGR e il modello caricato,
+    restituisce una maschera binaria (uint8, stessa shape di roi_bgr[:,:,0])
+    dove 255 = nastro blu rilevato, 0 = sfondo.
+
+    TODO (Giacomo): implementare questa funzione con inferenza ONNX/RF-DETR.
+    Passi attesi:
+      1. Pre-processing: ridimensiona roi_bgr a 640x640, normalizza [0,1], aggiungi batch dim
+      2. Inferenza: output = model.run(None, {'images': input_tensor})
+      3. Post-processing: estrai la maschera di segmentazione dalla classe 'blue_line'
+                          e ridimensionala alle dimensioni originali del ROI
+      4. Ritorna la maschera come np.uint8 con valori 0/255
+
+    Struttura del modello:
+      - Formato: ONNX esportato da Roboflow (RF-DETR Segmentation Small/Medium)
+      - Path atteso: ros2_ws/src/sancho_perception/models/trail_segmentation.onnx
+      - Classe: 'blue_line' (o 'nastro_blu' — deve corrispondere al label su Roboflow)
+      - Input shape: [1, 3, 640, 640] float32, normalizzato 0-1
     """
-    # Spazio colore e livellamento illuminazione (CLAHE)
-    lab = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2LAB)
-    l_ch, a_ch, b_ch = cv2.split(lab)
-    clahe = cv2.createCLAHE(clipLimit=clahe_clip, tileGridSize=(clahe_tile, clahe_tile))
-    l_eq = clahe.apply(l_ch)
-    lab_eq = cv2.merge([l_eq, a_ch, b_ch])
-
-    # Soglia colore iniziale e pulizia morfologica rapida
-    raw_mask = cv2.inRange(lab_eq, lab_lower, lab_upper)
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (morph_k, morph_k))
-    raw_mask = cv2.morphologyEx(raw_mask, cv2.MORPH_OPEN, kernel)
-    raw_mask = cv2.morphologyEx(raw_mask, cv2.MORPH_CLOSE, kernel)
-
-    # Controllo di sicurezza sull'area totale della maschera
-    if cv2.countNonZero(raw_mask) < min_total_mask_area:
-        return np.zeros_like(raw_mask)
-
-    # Filtraggio geometrico dei contorni (Sostituisce is_tape_like in modo piatto)
-    clean_mask = np.zeros_like(raw_mask)
-    contours, _ = cv2.findContours(raw_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-    for cnt in contours:
-        # Controllo Area minima
-        area = cv2.contourArea(cnt)
-        if area < min_contour_area:
-            continue
-            
-        # Controllo Solidità (rapporto area contorno / convex hull)
-        hull_area = cv2.contourArea(cv2.convexHull(cnt))
-        if hull_area == 0 or (area / hull_area) < min_solidity:
-            continue
-            
-        # Controllo Larghezza minima del Bounding Box dritto
-        _, _, w, _ = cv2.boundingRect(cnt)
-        if w < min_tape_width_px:
-            continue
-            
-        # Controllo Elongazione (Rapporto lati del rettangolo ruotato minimo)
-        (_, _), (rw, rh), _ = cv2.minAreaRect(cnt)
-        short_side = min(rw, rh)
-        if short_side < 1.0:
-            continue
-        if (max(rw, rh) / short_side) < min_elongation:
-            continue
-            
-        # Se supera tutti i cancelli di qualità, il blob viene approvato e disegnato
-        cv2.drawContours(clean_mask, [cnt], -1, 255, -1)
-
-    return clean_mask
+    # TODO (Giacomo): sostituire con inferenza reale
+    h, w = roi_bgr.shape[:2]
+    return np.zeros((h, w), dtype=np.uint8)  # placeholder: maschera vuota
 
 
 def mask_to_error(clean_mask, *,
@@ -167,27 +130,20 @@ class CameraNode(Node):
 
         # Parametri ROI e Frequenza
         self.roi_height_percent = float(self.declare_parameter('roi_height_percent', 0.70).value)
-        self.publish_rate_hz    = float(self.declare_parameter('publish_rate_hz', 30.0).value)
+        self.publish_rate_hz    = float(self.declare_parameter('publish_rate_hz', 10.0).value)
 
-        # Parametri Spazio Colore LAB
-        lab_a_min = int(self.declare_parameter('lab_a_min', 100).value)
-        lab_a_max = int(self.declare_parameter('lab_a_max', 145).value)
-        lab_b_min = int(self.declare_parameter('lab_b_min',  60).value)
-        lab_b_max = int(self.declare_parameter('lab_b_max', 115).value)
-        self.lab_lower = np.array([0,   lab_a_min, lab_b_min], dtype=np.uint8)
-        self.lab_upper = np.array([255, lab_a_max, lab_b_max], dtype=np.uint8)
+        # Parametro path modello ONNX
+        model_path = str(self.declare_parameter(
+            'model_path',
+            'models/trail_segmentation.onnx'  # TODO (Giacomo): metti il path corretto dopo il training
+        ).value)
 
-        # Parametri Filtri Immagine
-        self.clahe_clip  = float(self.declare_parameter('clahe_clip', 2.0).value)
-        self.clahe_tile  = int(self.declare_parameter('clahe_tile', 8).value)
-        self.morph_k     = int(self.declare_parameter('morph_kernel_size', 5).value)
-
-        # Parametri di Qualità dei Blob
-        self.min_contour_area    = int(self.declare_parameter('min_contour_area', 500).value)
-        self.min_solidity        = float(self.declare_parameter('min_solidity', 0.60).value)
-        self.min_tape_width_px   = int(self.declare_parameter('min_tape_width_px', 15).value)
-        self.min_elongation      = float(self.declare_parameter('min_elongation', 2.5).value)
-        self.min_total_mask_area = int(self.declare_parameter('min_total_mask_area', 3000).value)
+        # TODO (Giacomo): caricare il modello ONNX qui con onnxruntime.
+        # Esempio:
+        #   import onnxruntime as ort
+        #   self.model = ort.InferenceSession(model_path, providers=['CPUExecutionProvider'])
+        # Per ora self.model è None — get_trail_mask() restituisce una maschera vuota.
+        self.model = None
 
         # Parametri Fitting Linea
         self.num_strips             = int(self.declare_parameter('num_roi_strips', 3).value)
@@ -261,20 +217,9 @@ class CameraNode(Node):
         roi_y0 = int(h * (1.0 - self.roi_height_percent))
         roi = frame[roi_y0:, :].copy()
 
-        # 1. Generazione della maschera colore già filtrata dai blob estranei
-        clean_mask = lab_mask(
-            roi,
-            lab_lower           = self.lab_lower,
-            lab_upper           = self.lab_upper,
-            clahe_clip          = self.clahe_clip,
-            clahe_tile          = self.clahe_tile,
-            morph_k             = self.morph_k,
-            min_total_mask_area = self.min_total_mask_area,
-            min_contour_area    = self.min_contour_area,
-            min_solidity        = self.min_solidity,
-            min_tape_width_px   = self.min_tape_width_px,
-            min_elongation      = self.min_elongation
-        )
+        # 1. Segmentazione istanza: ottieni maschera binaria dal modello YOLO/RF-DETR
+        # TODO (Giacomo): quando il modello è caricato, get_trail_mask() farà l'inferenza reale
+        clean_mask = get_trail_mask(roi, self.model)
 
         # Creiamo un'area di disegno per l'overlay grafico sul frame completo
         # Passiamo la sezione ROI a `mask_to_error` in modo che possa disegnarci sopra

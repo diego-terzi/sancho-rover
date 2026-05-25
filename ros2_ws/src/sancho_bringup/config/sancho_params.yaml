@@ -3,23 +3,13 @@ camera_node:
     camera_index: 0
     frame_width: 640
     frame_height: 480
-    publish_rate_hz: 30.0
-    lab_a_min: 89               # A channel lower bound (green-red axis, 0-255; 128=neutral)
-    lab_a_max: 138              # A channel upper bound
-    lab_b_min: 97               # B channel lower bound (blue-yellow axis; blue = LOW values below 128)
-    lab_b_max: 144              # B channel upper bound — tune with visualizer drag-to-sample
-    clahe_clip: 2.0             # CLAHE clipLimit — aggressiveness of local contrast normalisation
-    clahe_tile: 8               # CLAHE tileGridSize (n×n grid)
+    publish_rate_hz: 10.0       # abbassato da 30Hz — RF-DETR/YOLO su ARM64 senza GPU
+    # TODO (Giacomo): aggiorna model_path con il path assoluto dopo aver copiato il .onnx sul rover
+    model_path: 'models/trail_segmentation.onnx'
     roi_height_percent: 1.00
     num_roi_strips: 3           # horizontal slices for multi-point line fit
-    min_contour_area: 500       # px; per-strip minimum; below this a blob is ignored
-    min_solidity: 0.24           # area/convex_hull_area; 0.0 = disabilitato (l'L-corner ha solidity ~0.5 e veniva scartata). Restano area + width + total_mask_area come gate antirumore.
-    min_tape_width_px: 27       # bounding-rect width per strip; eliminates narrow/pointy blobs
-    min_elongation: 1.1         # long/short side del minAreaRect (rettangolo ruotato); linea (dritta o ad angolo) ~3+, ciuffi d'erba tondeggianti ~1 -> scartati. Funziona a ogni orientamento.
-    min_total_mask_area: 3000   # px in the whole ROI mask; below this the scene is treated as empty
     max_fit_residual_px: 30.0   # mean |x_pred-x_actual| across strips; above this the line fit is rejected
-    lookahead_row_fraction: 0.00 # row to project for /trail_lookahead_error: 0=top of ROI (max anticipation, auto-clamped to topmost centroid); 1=bottom (no anticipation)
-    morph_kernel_size: 5        # erosion/dilation kernel; increase on noisy images
+    lookahead_row_fraction: 0.00 # row to project for /trail_lookahead_error: 0=top of ROI; 1=bottom
     ema_alpha: 0.3              # EMA weight on new sample (0=frozen, 1=no smoothing)
     lost_trail_patience: 5      # frames to coast before publishing NaN
     show_debug: true

@@ -3,6 +3,11 @@
 CLAUDE.md
 claude.md
 
+# ML models — copiare manualmente sul rover, non committare
+*.onnx
+*.pt
+*.pth
+
 # ROS 2 build artifacts
 ros2_ws/build/
 ros2_ws/install/
