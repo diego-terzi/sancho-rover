@@ -3,9 +3,8 @@ camera_node:
     camera_index: 0
     frame_width: 640
     frame_height: 480
-    publish_rate_hz: 10.0       # abbassato da 30Hz — inferenza su ARM64 senza GPU
-    roboflow_model_id: 'giacomos-workspace-1jdjc/bluline/2'
-    roboflow_api_key: ''        # LASCIARE VUOTO — usare la variabile d'ambiente ROBOFLOW_API_KEY
+    publish_rate_hz: 10.0       # abbassato da 30Hz — inferenza ONNX su ARM64 CPU
+    model_path: 'models/trail_segmentation.onnx'  # TODO (Giacomo): esportare da Roboflow → Deploy → Export → ONNX
     roi_height_percent: 1.00
     num_roi_strips: 3           # horizontal slices for multi-point line fit
     max_fit_residual_px: 30.0   # mean |x_pred-x_actual| across strips; above this the line fit is rejected

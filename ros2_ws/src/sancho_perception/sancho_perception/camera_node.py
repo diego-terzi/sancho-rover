@@ -1,18 +1,17 @@
 """
 Camera Node - Yolo_Trail_Test branch
 --------------------------------------
-Rileva la linea di nastro BLU tramite Roboflow Inference SDK e pubblica:
+Rileva la linea di nastro BLU tramite inferenza ONNX locale (onnxruntime) e pubblica:
   - /trail_error            (Float32): Errore laterale per il PID
   - /trail_lookahead_error  (Float32): Errore anticipato per la velocità
   - /camera/mask_view       (Image): Streaming della maschera binaria pulita
   - /camera/debug_view      (Image): Streaming video con overlay grafico (linee, punti)
 
-Dipendenza: pip install inference
-API key: impostare la variabile d'ambiente ROBOFLOW_API_KEY (non metterla nel codice/YAML)
-Model ID: impostare roboflow_model_id in sancho_params.yaml (es. "diego-terzi/sancho-trail/1")
+Dipendenza: pip install onnxruntime  (~16 MB, ARM64 supportato)
+Modello:    esportare da Roboflow → Deploy → Export → ONNX
+            copiare il file in: ros2_ws/src/sancho_perception/models/trail_segmentation.onnx
 """
 
-import os
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Float32, String
@@ -20,28 +19,29 @@ from sensor_msgs.msg import Image
 from cv_bridge import CvBridge
 import cv2
 import numpy as np
-from inference import get_model
 
 
 def get_trail_mask(roi_bgr, model):
     """
-    Riceve il ROI BGR e il modello Roboflow caricato.
+    Riceve il ROI BGR e la sessione ONNX caricata.
     Restituisce una maschera binaria (uint8) dove 255 = nastro blu, 0 = sfondo.
     Se il modello non è caricato restituisce una maschera vuota (nodo avviabile senza crash).
+
+    TODO (Giacomo): implementare pre/post processing ONNX.
+    Passi attesi:
+      1. Ridimensiona roi_bgr a 432x432, converti BGR→RGB, normalizza [0,1], aggiungi batch dim
+         input_tensor = np.transpose(img, (2,0,1))[None].astype(np.float32)
+      2. Inferenza: outputs = model.run(None, {model.get_inputs()[0].name: input_tensor})
+      3. Post-processing: estrai la maschera di segmentazione per la classe 'blue_line'
+         (la struttura di outputs dipende dal modello — verifica con model.get_outputs())
+      4. Ridimensiona la maschera alle dimensioni originali del ROI e ritorna come uint8 0/255
     """
     h, w = roi_bgr.shape[:2]
     if model is None:
         return np.zeros((h, w), dtype=np.uint8)
 
-    results = model.infer(roi_bgr)[0]
-    mask = np.zeros((h, w), dtype=np.uint8)
-    for pred in results.predictions:
-        if pred.class_name != 'blue_line':
-            continue
-        # pred.points è una lista di oggetti Point con attributi .x e .y
-        points = np.array([[int(p.x), int(p.y)] for p in pred.points], dtype=np.int32)
-        cv2.fillPoly(mask, [points], 255)
-    return mask
+    # TODO (Giacomo): sostituire con pre/post processing reale (vedi docstring)
+    return np.zeros((h, w), dtype=np.uint8)
 
 
 def mask_to_error(clean_mask, *,
@@ -129,21 +129,22 @@ class CameraNode(Node):
         self.roi_height_percent = float(self.declare_parameter('roi_height_percent', 0.70).value)
         self.publish_rate_hz    = float(self.declare_parameter('publish_rate_hz', 10.0).value)
 
-        # Caricamento modello Roboflow Inference SDK
-        model_id = str(self.declare_parameter('roboflow_model_id', '').value)
-        api_key  = str(self.declare_parameter('roboflow_api_key', '').value) \
-                   or os.environ.get('ROBOFLOW_API_KEY', '')
+        # Caricamento modello ONNX (onnxruntime)
+        model_path = str(self.declare_parameter(
+            'model_path',
+            'models/trail_segmentation.onnx'
+        ).value)
 
-        if not model_id:
-            self.get_logger().warn(
-                'roboflow_model_id non impostato — il nodo parte ma non rileva nulla. '
-                'Imposta il parametro in sancho_params.yaml (es. "workspace/progetto/1")'
+        try:
+            import onnxruntime as ort
+            self.model = ort.InferenceSession(
+                model_path, providers=['CPUExecutionProvider']
             )
+            self.get_logger().info(f'Modello ONNX caricato: {model_path}')
+        except Exception as e:
+            # Nodo avviabile anche senza modello — get_trail_mask() restituirà maschera vuota
+            self.get_logger().warn(f'Modello ONNX non caricato ({e}) — rilevazione disabilitata')
             self.model = None
-        else:
-            self.get_logger().info(f'Caricamento modello Roboflow: {model_id}')
-            self.model = get_model(model_id=model_id, api_key=api_key)
-            self.get_logger().info('Modello pronto (i pesi vengono scaricati in cache alla prima infer)')
 
         # Parametri Fitting Linea
         self.num_strips             = int(self.declare_parameter('num_roi_strips', 3).value)
