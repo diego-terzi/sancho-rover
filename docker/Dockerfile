@@ -47,7 +47,8 @@ RUN pip3 install --no-cache-dir --break-system-packages arduino-bridge || \
 RUN pip3 install torch torchvision --index-url https://download.pytorch.org/whl/cpu --no-cache-dir --break-system-packages
 
 # 2. Install Ultralytics for YOLO inference.
-RUN pip3 install ultralytics --no-cache-dir --break-system-packages
+# Blocchiamo numpy alla versione di sistema per evitare conflitti con APT e cv_bridge
+RUN pip3 install ultralytics "numpy==1.26.4" --no-cache-dir --break-system-packages
 
 # ── workspace build ──────────────────────────────────────────────────────────
 WORKDIR /ros2_ws
