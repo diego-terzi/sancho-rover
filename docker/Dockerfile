@@ -39,11 +39,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ros-jazzy-rqt-image-view \
     && rm -rf /var/lib/apt/lists/*
 
-# ── Arduino Bridge Python client ─────────────────────────────────────────────
-# Used by motor_bridge_node to call set_motors() on the MCU over the internal
-# UART. If this install fails the node falls back to dry_run mode and logs
-# the failure — the rest of the stack still works (controller, camera, sim).
-# TODO: confirm the exact package name once the Arduino UNO Q SDK is finalised.
+# ── Python dependencies ───────────────────────────────────────────────────────
+# onnxruntime: inferenza YOLOv8 instance segmentation locale (camera_node)
+RUN pip3 install --no-cache-dir --break-system-packages onnxruntime
+
+# arduino-bridge: usato da motor_bridge_node per chiamare set_motors() sull'MCU.
+# Se non disponibile il nodo cade in dry_run automaticamente.
 RUN pip3 install --no-cache-dir --break-system-packages arduino-bridge || \
     echo "WARNING: arduino-bridge not installed; motor_bridge_node will run in dry_run."
 
@@ -64,4 +65,4 @@ RUN . /opt/ros/jazzy/setup.sh && \
 # Any extra args on `docker run image_name <args>` are forwarded to ros2 launch
 # as launch arguments, e.g. `docker run ... sancho_rover:latest wheel_separation:=0.45`
 # overrides the wheel_separation parameter for that run only.
-ENTRYPOINT ["/bin/bash", "-c", "source /opt/ros/jazzy/setup.bash && source /ros2_ws/install/setup.bash && exec ros2 launch sancho_bringup sancho_launch.py \"$@\"", "--"]
+ENTRYPOINT ["/bin/bash", "-c", "source /opt/ros/jazzy/setup.bash && source /ros2_ws/install/setup.bash && exec ros2 launch sancho_bringup trail_test_launch.py \"$@\"", "--"]
