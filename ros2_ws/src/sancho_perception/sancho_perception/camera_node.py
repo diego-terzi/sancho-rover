@@ -1,15 +1,17 @@
 """
 Camera Node - Yolo_Trail_Test branch
 --------------------------------------
-Rileva la linea di nastro BLU tramite inferenza ONNX locale (onnxruntime) e pubblica:
+Rileva la linea di nastro BLU tramite YOLOv8 instance segmentation (ONNX locale) e pubblica:
   - /trail_error            (Float32): Errore laterale per il PID
   - /trail_lookahead_error  (Float32): Errore anticipato per la velocità
   - /camera/mask_view       (Image): Streaming della maschera binaria pulita
   - /camera/debug_view      (Image): Streaming video con overlay grafico (linee, punti)
 
 Dipendenza: pip install onnxruntime  (~16 MB, ARM64 supportato)
-Modello:    esportare da Roboflow → Deploy → Export → ONNX
-            copiare il file in: ros2_ws/src/sancho_perception/models/trail_segmentation.onnx
+Modello:    YOLOv8 instance segmentation, 1 classe (blue_line)
+            Input:   [1, 3, 640, 640] float32
+            output0: [1, 37, 8400]    — bbox + conf + 32 mask coefficients
+            output1: [1, 32, 160, 160] — prototype masks
 """
 
 import rclpy
@@ -20,28 +22,50 @@ from cv_bridge import CvBridge
 import cv2
 import numpy as np
 
+_YOLO_INPUT_SIZE  = 640
+_CONF_THRESHOLD   = 0.25  # TODO: tune — abbassa se non rileva, alza se troppi falsi positivi
+_MASK_THRESHOLD   = 0.5
+
 
 def get_trail_mask(roi_bgr, model):
     """
-    Riceve il ROI BGR e la sessione ONNX caricata.
+    Riceve il ROI BGR e la sessione ONNX YOLOv8-seg caricata.
     Restituisce una maschera binaria (uint8) dove 255 = nastro blu, 0 = sfondo.
-    Se il modello non è caricato restituisce una maschera vuota (nodo avviabile senza crash).
-
-    TODO (Giacomo): implementare pre/post processing ONNX.
-    Passi attesi:
-      1. Ridimensiona roi_bgr a 432x432, converti BGR→RGB, normalizza [0,1], aggiungi batch dim
-         input_tensor = np.transpose(img, (2,0,1))[None].astype(np.float32)
-      2. Inferenza: outputs = model.run(None, {model.get_inputs()[0].name: input_tensor})
-      3. Post-processing: estrai la maschera di segmentazione per la classe 'blue_line'
-         (la struttura di outputs dipende dal modello — verifica con model.get_outputs())
-      4. Ridimensiona la maschera alle dimensioni originali del ROI e ritorna come uint8 0/255
     """
     h, w = roi_bgr.shape[:2]
     if model is None:
         return np.zeros((h, w), dtype=np.uint8)
 
-    # TODO (Giacomo): sostituire con pre/post processing reale (vedi docstring)
-    return np.zeros((h, w), dtype=np.uint8)
+    # Pre-processing: 640x640, BGR→RGB, normalizza [0,1], batch dim
+    img = cv2.resize(roi_bgr, (_YOLO_INPUT_SIZE, _YOLO_INPUT_SIZE))
+    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+    img = np.transpose(img, (2, 0, 1))[np.newaxis]  # [1, 3, 640, 640]
+
+    # Inferenza
+    output0, output1 = model.run(None, {'images': img})
+    # output0: [1, 37, 8400]    — [x,y,w,h, conf, coef*32] per anchor
+    # output1: [1, 32, 160, 160] — prototype masks
+
+    preds  = output0[0]   # [37, 8400]
+    protos = output1[0]   # [32, 160, 160]
+
+    # Filtra per confidenza (indice 4 = classe 0: blue_line)
+    keep = preds[4] > _CONF_THRESHOLD
+    if not np.any(keep):
+        return np.zeros((h, w), dtype=np.uint8)
+
+    # Mask coefficients per le detection tenute: [32, N]
+    coefs = preds[5:, keep]
+
+    # Calcola instance masks: sigmoid(coefs.T @ protos_flat) → [N, 160, 160]
+    protos_flat = protos.reshape(32, -1)                    # [32, 25600]
+    raw   = coefs.T @ protos_flat                           # [N, 25600]
+    masks = 1.0 / (1.0 + np.exp(-raw))                     # sigmoid
+    masks = masks.reshape(-1, 160, 160)                     # [N, 160, 160]
+
+    # Unione di tutte le istanze → maschera binaria → resize al ROI originale
+    combined = np.any(masks > _MASK_THRESHOLD, axis=0).astype(np.uint8) * 255
+    return cv2.resize(combined, (w, h), interpolation=cv2.INTER_NEAREST)
 
 
 def mask_to_error(clean_mask, *,
@@ -132,7 +156,7 @@ class CameraNode(Node):
         # Caricamento modello ONNX (onnxruntime)
         model_path = str(self.declare_parameter(
             'model_path',
-            'models/trail_segmentation.onnx'
+            'models/trail_detector.onnx'
         ).value)
 
         try:
