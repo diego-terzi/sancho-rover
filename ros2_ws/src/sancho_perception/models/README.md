@@ -24,5 +24,6 @@ pip install onnxruntime
 ## Note
 
 - I file `.onnx` NON sono committati nel repo (`.gitignore` li esclude) — vanno copiati manualmente sul rover
-- Input atteso dal modello: `[1, 3, 640, 640]` float32, normalizzato 0-1
+- Input atteso dal modello: `[1, 3, 432, 432]` float32, normalizzato 0-1
+- Su Roboflow, impostare il resize a **432×432** nel dataset version (preprocessing step)
 - Classe da estrarre: `blue_line`

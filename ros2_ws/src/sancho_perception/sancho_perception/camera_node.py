@@ -30,7 +30,7 @@ def get_trail_mask(roi_bgr, model):
 
     TODO (Giacomo): implementare questa funzione con inferenza ONNX/RF-DETR.
     Passi attesi:
-      1. Pre-processing: ridimensiona roi_bgr a 640x640, normalizza [0,1], aggiungi batch dim
+      1. Pre-processing: ridimensiona roi_bgr a 432x432, normalizza [0,1], aggiungi batch dim
       2. Inferenza: output = model.run(None, {'images': input_tensor})
       3. Post-processing: estrai la maschera di segmentazione dalla classe 'blue_line'
                           e ridimensionala alle dimensioni originali del ROI
@@ -40,7 +40,8 @@ def get_trail_mask(roi_bgr, model):
       - Formato: ONNX esportato da Roboflow (RF-DETR Segmentation Small/Medium)
       - Path atteso: ros2_ws/src/sancho_perception/models/trail_segmentation.onnx
       - Classe: 'blue_line' (o 'nastro_blu' — deve corrispondere al label su Roboflow)
-      - Input shape: [1, 3, 640, 640] float32, normalizzato 0-1
+      - Input shape: [1, 3, 432, 432] float32, normalizzato 0-1
+      - IMPORTANTE: su Roboflow, nel dataset version, imposta resize a 432x432
     """
     # TODO (Giacomo): sostituire con inferenza reale
     h, w = roi_bgr.shape[:2]
