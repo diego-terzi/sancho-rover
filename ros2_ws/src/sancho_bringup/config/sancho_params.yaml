@@ -3,8 +3,22 @@ camera_node:
     camera_index: 0
     frame_width: 640
     frame_height: 480
-    publish_rate_hz: 10.0       # abbassato da 30Hz — inferenza ONNX su ARM64 CPU
-    model_path: 'models/trail_detector.onnx'
+    publish_rate_hz: 30.0       # detector LAB+CLAHE è leggero, niente inferenza ML
+    # --- Soglie colore LAB per il nastro BLU (canali a,b dopo CLAHE) ---
+    # Calibrabili con tools/test_camera_lab.py (click sul nastro -> scrive qui).
+    lab_a_min: 100
+    lab_a_max: 145
+    lab_b_min: 60
+    lab_b_max: 115
+    clahe_clip: 2.0             # CLAHE clipLimit sul canale L (livella la luce)
+    clahe_tile: 8               # CLAHE tileGridSize (n×n)
+    morph_kernel_size: 5        # erosione/dilatazione; alza su immagini rumorose
+    # --- Filtri qualità blob (anti-rumore) ---
+    min_contour_area: 500       # px; blob più piccoli scartati
+    min_solidity: 0.60          # area/convex-hull minima
+    min_tape_width_px: 15       # larghezza bounding-box minima
+    min_elongation: 2.5         # rapporto lati min-rect (il nastro è allungato)
+    min_total_mask_area: 3000   # px totali; sotto = scena vuota
     roi_height_percent: 1.00
     num_roi_strips: 3           # horizontal slices for multi-point line fit
     max_fit_residual_px: 30.0   # mean |x_pred-x_actual| across strips; above this the line fit is rejected

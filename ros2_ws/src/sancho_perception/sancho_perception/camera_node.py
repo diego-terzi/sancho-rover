@@ -1,73 +1,68 @@
 """
-Camera Node - Yolo_Trail_Test branch
---------------------------------------
-Rileva la linea di nastro BLU tramite YOLOv8 instance segmentation (ONNX locale) e pubblica:
+Camera Node - LAB branch (detector colore LAB + CLAHE)
+------------------------------------------------------
+Rileva la linea di nastro BLU tramite soglia di colore nello spazio LAB con
+equalizzazione CLAHE (nessun modello ML) e pubblica:
   - /trail_error            (Float32): Errore laterale per il PID
   - /trail_lookahead_error  (Float32): Errore anticipato per la velocità
   - /camera/mask_view       (Image): Streaming della maschera binaria pulita
   - /camera/debug_view      (Image): Streaming video con overlay grafico (linee, punti)
 
-Dipendenza: pip install onnxruntime  (~16 MB, ARM64 supportato)
-Modello:    YOLOv8 instance segmentation, 1 classe (blue_line)
-            Input:   [1, 3, 640, 640] float32
-            output0: [1, 37, 8400]    — bbox + conf + 32 mask coefficients
-            output1: [1, 32, 160, 160] — prototype masks
+Soglie LAB calibrabili dai params (lab_a_min/max, lab_b_min/max). Calibrazione
+assistita: tools/test_camera_lab.py (click sul nastro -> scrive i range qui).
 """
 
-import os
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Float32, String
 from sensor_msgs.msg import Image
 from cv_bridge import CvBridge
-from ament_index_python.packages import get_package_share_directory
 import cv2
 import numpy as np
 
-_YOLO_INPUT_SIZE  = 640
-_CONF_THRESHOLD   = 0.25  # TODO: tune — abbassa se non rileva, alza se troppi falsi positivi
-_MASK_THRESHOLD   = 0.5
 
-
-def get_trail_mask(roi_bgr, model):
+def lab_mask(roi_bgr, *, lab_lower, lab_upper, clahe_clip, clahe_tile, morph_k,
+             min_total_mask_area, min_contour_area, min_solidity,
+             min_tape_width_px, min_elongation):
     """
-    Riceve il ROI BGR e la sessione ONNX YOLOv8-seg caricata.
-    Restituisce una maschera binaria (uint8) dove 255 = nastro blu, 0 = sfondo.
+    Converte in LAB, applica CLAHE sul canale L, soglia il colore (canali a,b)
+    e filtra i blob di rumore. Restituisce una maschera binaria già pulita
+    (uint8, 255 = nastro, 0 = sfondo).
     """
-    h, w = roi_bgr.shape[:2]
-    if model is None:
-        return np.zeros((h, w), dtype=np.uint8)
+    lab = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2LAB)
+    l_ch, a_ch, b_ch = cv2.split(lab)
+    clahe = cv2.createCLAHE(clipLimit=clahe_clip, tileGridSize=(clahe_tile, clahe_tile))
+    l_eq = clahe.apply(l_ch)
+    lab_eq = cv2.merge([l_eq, a_ch, b_ch])
 
-    # Pre-processing: 640x640, BGR→RGB, normalizza [0,1], batch dim
-    img = cv2.resize(roi_bgr, (_YOLO_INPUT_SIZE, _YOLO_INPUT_SIZE))
-    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
-    img = np.transpose(img, (2, 0, 1))[np.newaxis]  # [1, 3, 640, 640]
+    raw_mask = cv2.inRange(lab_eq, lab_lower, lab_upper)
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (morph_k, morph_k))
+    raw_mask = cv2.morphologyEx(raw_mask, cv2.MORPH_OPEN, kernel)
+    raw_mask = cv2.morphologyEx(raw_mask, cv2.MORPH_CLOSE, kernel)
 
-    # Inferenza
-    output0, output1 = model.run(None, {'images': img})
-    # output0: [1, 37, 8400]    — [x,y,w,h, conf, coef*32] per anchor
-    # output1: [1, 32, 160, 160] — prototype masks
+    if cv2.countNonZero(raw_mask) < min_total_mask_area:
+        return np.zeros_like(raw_mask)
 
-    preds  = output0[0]   # [37, 8400]
-    protos = output1[0]   # [32, 160, 160]
-
-    # Filtra per confidenza (indice 4 = classe 0: blue_line)
-    keep = preds[4] > _CONF_THRESHOLD
-    if not np.any(keep):
-        return np.zeros((h, w), dtype=np.uint8)
-
-    # Mask coefficients per le detection tenute: [32, N]
-    coefs = preds[5:, keep]
-
-    # Calcola instance masks: sigmoid(coefs.T @ protos_flat) → [N, 160, 160]
-    protos_flat = protos.reshape(32, -1)                    # [32, 25600]
-    raw   = coefs.T @ protos_flat                           # [N, 25600]
-    masks = 1.0 / (1.0 + np.exp(-raw))                     # sigmoid
-    masks = masks.reshape(-1, 160, 160)                     # [N, 160, 160]
-
-    # Unione di tutte le istanze → maschera binaria → resize al ROI originale
-    combined = np.any(masks > _MASK_THRESHOLD, axis=0).astype(np.uint8) * 255
-    return cv2.resize(combined, (w, h), interpolation=cv2.INTER_NEAREST)
+    clean_mask = np.zeros_like(raw_mask)
+    contours, _ = cv2.findContours(raw_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    for cnt in contours:
+        area = cv2.contourArea(cnt)
+        if area < min_contour_area:
+            continue
+        hull_area = cv2.contourArea(cv2.convexHull(cnt))
+        if hull_area == 0 or (area / hull_area) < min_solidity:
+            continue
+        _, _, ww, _ = cv2.boundingRect(cnt)
+        if ww < min_tape_width_px:
+            continue
+        (_, _), (rw, rh), _ = cv2.minAreaRect(cnt)
+        short_side = min(rw, rh)
+        if short_side < 1.0:
+            continue
+        if (max(rw, rh) / short_side) < min_elongation:
+            continue
+        cv2.drawContours(clean_mask, [cnt], -1, 255, -1)
+    return clean_mask
 
 
 def mask_to_error(clean_mask, *,
@@ -155,28 +150,25 @@ class CameraNode(Node):
         self.roi_height_percent = float(self.declare_parameter('roi_height_percent', 0.70).value)
         self.publish_rate_hz    = float(self.declare_parameter('publish_rate_hz', 10.0).value)
 
-        # Caricamento modello ONNX (onnxruntime)
-        model_path = str(self.declare_parameter(
-            'model_path',
-            'models/trail_detector.onnx'
-        ).value)
+        # Soglie colore LAB (canali a,b) — calibrabili dai params / test tool
+        lab_a_min = int(self.declare_parameter('lab_a_min', 100).value)
+        lab_a_max = int(self.declare_parameter('lab_a_max', 145).value)
+        lab_b_min = int(self.declare_parameter('lab_b_min',  60).value)
+        lab_b_max = int(self.declare_parameter('lab_b_max', 115).value)
+        self.lab_lower = np.array([0,   lab_a_min, lab_b_min], dtype=np.uint8)
+        self.lab_upper = np.array([255, lab_a_max, lab_b_max], dtype=np.uint8)
 
-        # Risolve path relativo rispetto alla share directory del pacchetto
-        if not os.path.isabs(model_path):
-            model_path = os.path.join(
-                get_package_share_directory('sancho_perception'),
-                model_path
-            )
+        # Filtri immagine (CLAHE + morfologia)
+        self.clahe_clip = float(self.declare_parameter('clahe_clip', 2.0).value)
+        self.clahe_tile = int(self.declare_parameter('clahe_tile', 8).value)
+        self.morph_k    = int(self.declare_parameter('morph_kernel_size', 5).value)
 
-        try:
-            import onnxruntime as ort
-            self.model = ort.InferenceSession(
-                model_path, providers=['CPUExecutionProvider']
-            )
-            self.get_logger().info(f'Modello ONNX caricato: {model_path}')
-        except Exception as e:
-            self.get_logger().warn(f'Modello ONNX non caricato ({e}) — rilevazione disabilitata')
-            self.model = None
+        # Filtri qualità blob (anti-rumore)
+        self.min_contour_area    = int(self.declare_parameter('min_contour_area', 500).value)
+        self.min_solidity        = float(self.declare_parameter('min_solidity', 0.60).value)
+        self.min_tape_width_px   = int(self.declare_parameter('min_tape_width_px', 15).value)
+        self.min_elongation      = float(self.declare_parameter('min_elongation', 2.5).value)
+        self.min_total_mask_area = int(self.declare_parameter('min_total_mask_area', 3000).value)
 
         # Parametri Fitting Linea
         self.num_strips             = int(self.declare_parameter('num_roi_strips', 3).value)
@@ -250,8 +242,20 @@ class CameraNode(Node):
         roi_y0 = int(h * (1.0 - self.roi_height_percent))
         roi = frame[roi_y0:, :].copy()
 
-        # 1. Segmentazione istanza: maschera binaria dal modello YOLOv8-seg ONNX
-        clean_mask = get_trail_mask(roi, self.model)
+        # 1. Maschera colore LAB+CLAHE già filtrata dai blob estranei
+        clean_mask = lab_mask(
+            roi,
+            lab_lower           = self.lab_lower,
+            lab_upper           = self.lab_upper,
+            clahe_clip          = self.clahe_clip,
+            clahe_tile          = self.clahe_tile,
+            morph_k             = self.morph_k,
+            min_total_mask_area = self.min_total_mask_area,
+            min_contour_area    = self.min_contour_area,
+            min_solidity        = self.min_solidity,
+            min_tape_width_px   = self.min_tape_width_px,
+            min_elongation      = self.min_elongation,
+        )
 
         # Creiamo un'area di disegno per l'overlay grafico sul frame completo
         # Passiamo la sezione ROI a `mask_to_error` in modo che possa disegnarci sopra
