@@ -21,7 +21,7 @@ class ControllerNode(Node):
         # --- PARAMETRI DI CONTROLLO (Tuning) ---
         self.TARGET_DISTANCE = 1.5     # Distanza ideale in metri
         self.SAFE_DISTANCE = 1.2       # Sotto questa distanza, frenata d'emergenza
-        self.MAX_DISTANCE = 3.5        # Oltre questa, velocità massima
+        self.MAX_DISTANCE = 2.5        # Oltre questa, velocità massima
         self.MAX_LINEAR_SPEED = 2.0    # m/s (La velocità di picco del tuo rover)
         self.MAX_ANGULAR_SPEED = 1.5   # rad/s (Velocità massima di rotazione)
         
@@ -32,7 +32,7 @@ class ControllerNode(Node):
         # Rendono i movimenti fluidi ignorando il "rumore" della telecamera
         self.smoothed_distance = None
         self.smoothed_offset = 0.0
-        self.alpha = 0.2  # Quanto il filtro è "pesante" (0.1 = molto fluido/lento, 0.9 = molto reattivo/nervoso)
+        self.alpha = 0.4  # Quanto il filtro è "pesante" (0.1 = molto fluido/lento, 0.9 = molto reattivo/nervoso)
 
         self.get_logger().info("Nodo Controller avviato. In attesa del target...")
 
